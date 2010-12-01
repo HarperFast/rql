@@ -45,5 +45,11 @@ exports.testFiltering1 = function() {
 	assert.deepEqual(executeQuery("excludes(path.1,7)&sort()", {}, data), [data[0]]); // 7 found in second
 };
 
+exports.testValues = function() {
+	var data = [{"path.1":[1,2,3]}, {"path.1":[9,3,7]}];
+	assert.deepEqual(executeQuery("excludes(path.1,7)&values(path.1)", {}, data), [data[0]['path.1']]);
+	assert.deepEqual(executeQuery("excludes(path.1,7)&values(path.1,path.1)", {}, data), [[data[0]['path.1'], data[0]['path.1']]]);
+};
+
 if (require.main === module)
     require("patr/runner").run(exports);
