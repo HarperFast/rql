@@ -155,7 +155,7 @@ exports.testBindParameters = function() {
     parsed = parseQuery('in(id,$1)', [['a','b','c']]);
     assert.deepEqual(parsed, {name: 'and', args: [{name: 'in', args: ['id', ['a', 'b', 'c']]}], cache: {}});
     parsed = parseQuery('eq(id,$1)', ['a']);
-    assert.deepEqual(parsed, {name: 'and', args: [{name: 'eq', args: ['id', 'a']}], cache: {id: 'a'}});
+    assert.deepEqual(parsed, {name: 'and', args: [{name: 'eq', args: ['id', 'a']}], cache: {pk: 'a'}});
 };
 
 exports.testStringification = function() {
