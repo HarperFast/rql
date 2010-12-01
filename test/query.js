@@ -28,7 +28,7 @@ var queryPairs = {
     ],
     "dot-comparison": [
     	{"foo.bar=3": {name:"and", args:[{name:"eq", args:["foo.bar",3]}]}},
-    	{"select(sub.name)": {name:"and", args:[{name:"select", args:["sub.name"]}], cache: {select: ["sub.name"]}}}
+    	{"select(sub.name)": {name:"and", args:[{name:"select", args:["sub.name"]}]}}
     ],
     "equality": [
         {"eq(a,b)": {name:"and", args:[{name:"eq", args:["a","b"]}]}},
@@ -126,15 +126,11 @@ exports.testParsing = function() {
         queryPairs[group].forEach(function(pair) {
             var key = Object.keys(pair)[0];
             try{
-	            var parsed = parseQuery(key);
-	            if (!Object.keys(parsed.cache).length)
-							  delete parsed.cache;
-	            var result = pair[key];
-	            if(typeof result == "string"){
-	            	result = parseQuery(result);
-  	            if (!Object.keys(result.cache).length)
-									delete result.cache;
-	            }
+                    var parsed = parseQuery(key);
+                    var result = pair[key];
+                    if(typeof result == "string"){
+                    	result = parseQuery(result);
+                    }
             }catch(e){
             	e.message += " parsing " + group + ": " + key;
             	throw e;
@@ -153,9 +149,9 @@ exports.testBindParameters = function() {
     // TODO
     var parsed;
     parsed = parseQuery('in(id,$1)', [['a','b','c']]);
-    assert.deepEqual(parsed, {name: 'and', args: [{name: 'in', args: ['id', ['a', 'b', 'c']]}], cache: {}});
+    assert.deepEqual(parsed, {name: 'and', args: [{name: 'in', args: ['id', ['a', 'b', 'c']]}]});
     parsed = parseQuery('eq(id,$1)', ['a']);
-    assert.deepEqual(parsed, {name: 'and', args: [{name: 'eq', args: ['id', 'a']}], cache: {pk: 'a'}});
+    assert.deepEqual(parsed, {name: 'and', args: [{name: 'eq', args: ['id', 'a']}], pk: 'a'});
 };
 
 exports.testStringification = function() {
