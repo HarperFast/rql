@@ -49,6 +49,11 @@ exports.testSelect = function() {
 	var data = [{"path.1":[1,2,3]}, {"path.1":[9,3,7]}];
 	assert.deepEqual(executeQuery("excludes(path.1,7)&select(path.1)", {}, data), [data[0]]);
 	assert.deepEqual(executeQuery("excludes(path.1,7)&select(path.1/non-existent)", {}, data), [{}]);
+	var data = [{"a":{b:{c:1}}}];
+	assert.deepEqual(executeQuery("select(a)", {}, data), [data[0].a]);
+	assert.deepEqual(executeQuery("select(a/b)", {}, data), [data[0].a.b]);
+	assert.deepEqual(executeQuery("select(a/b/c)", {}, data), [data[0].a.b.c]);
+	assert.deepEqual(executeQuery("select(a/b/c/d)", {}, data), [{}]);
 };
 
 exports.testValues = function() {
