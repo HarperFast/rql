@@ -388,7 +388,8 @@ function query(query, options, target){
 			return typeof value === "string" ? stringify(value) : value;
 		}
 	}
-	var evaluator = eval("(function(target){return " + queryToJS(query) + ".call(target);})");
+	var evaluator;
+	eval("evaluator = (function(target){return " + queryToJS(query) + ".call(target);})");
 	return target ? evaluator(target) : evaluator;
 }
 function throwMaxIterations(){
