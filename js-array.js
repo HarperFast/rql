@@ -379,6 +379,9 @@ function query(query, options, target){
 						return "(function(){var filtered = []; for(var i = 0, length = this.length; i < length; i++){var item = this[i];if(" + condition + "){filtered.push(item);}} return filtered;})";
 					}
 				}else{
+					if (value instanceof Date){
+						return value.valueOf();
+					}
 					return "(function(){return op('" + value.name + "').call(this" +
 						(value && value.args && value.args.length > 0 ? (", " + value.args.map(queryToJS).join(",")) : "") +
 						")})";
