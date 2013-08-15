@@ -13,6 +13,7 @@ var parseQuery = parser.parseQuery;
 var stringify = JSON.stringify || function(str){
 	return '"' + str.replace(/"/g, "\\\"") + '"';
 };
+var nextId = 1;
 exports.jsOperatorMap = {
 	"eq" : "===",
 	"ne" : "!==",
@@ -77,9 +78,24 @@ exports.operators = {
 	}),
 	or: function(){
 		var items = [];
-		//TODO: remove duplicates and use condition property
-		for(var i = 0; i < arguments.length; i++){
-			items = items.concat(arguments[i].call(this));
+		var idProperty = "__rqlId" + nextId++;
+		try{
+			for(var i = 0; i < arguments.length; i++){
+				var group = arguments[i].call(this);
+				for(var j = 0, l = group.length;j < l;j++){
+					var item = group[j];
+					// use marker to do a union in linear time.
+					if(!item[idProperty]){
+						item[idProperty] = true;
+						items.push(item);
+					}
+				}
+			}
+		}finally{
+			// cleanup markers
+			for(var i = 0, l = items.length; i < l; i++){
+				delete items[idProperty];
+			}
 		}
 		return items;
 	},
