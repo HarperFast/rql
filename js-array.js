@@ -398,7 +398,7 @@ function query(query, options, target){
 					if (value instanceof Date){
 						return value.valueOf();
 					}
-					return "(function(){return op('" + value.name + "').call(this" +
+					return "(function(){return "+op.name+"('"+value.name+"').call(this" +
 						(value && value.args && value.args.length > 0 ? (", " + value.args.map(queryToJS).join(",")) : "") +
 						")})";
 				}
