@@ -31,7 +31,7 @@ parser.Query = function(seed, params){
 };
 exports.Query = parser.Query;
 //TODO:THE RIGHT WAY IS:exports.knownOperators = Object.keys(jsarray.operators || {}).concat(Object.keys(jsarray.jsOperatorMap || {}));
-exports.knownOperators = ["sort", "in", "not", "any", "all", "or", "and", "select", "exclude", "values", "limit", "distinct", "recurse", "aggregate", "between", "sum", "mean", "max", "min", "count", "first", "one", "eq", "ne", "le", "ge", "lt", "gt"];
+exports.knownOperators = ["sort", "match", "in", "not", "any", "all", "or", "and", "select", "exclude", "values", "limit", "distinct", "recurse", "aggregate", "between", "sum", "mean", "max", "min", "count", "first", "one", "eq", "ne", "le", "ge", "lt", "gt"];
 exports.knownScalarOperators = ["mean", "sum", "min", "max", "count", "first", "one"];
 exports.arrayMethods = ["forEach", "reduce", "map", "filter", "indexOf", "some", "every"];
 

@@ -178,5 +178,10 @@ exports.testStringification = function() {
     assert.deepEqual(parseQuery(Query().eq(name,1)+'').args[0].args[0], name);
 };
 
+exports.testMatches = function () {
+    var query = Query().match('name', /Will*/);
+    assert.equal('' + query, 'match(name,RE:Will*)');
+}
+
 if (require.main === module)
     require("patr/runner").run(exports);

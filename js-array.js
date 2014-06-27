@@ -364,7 +364,7 @@ function query(query, options, target){
 	var parameters = options.parameters || [];
 	var js = "";
 	function queryToJS(value){
-		if(value && typeof value === "object"){
+		if(value && typeof value === "object" && !(value instanceof RegExp)){
 			if(value instanceof Array){
 				return '[' + value.map(queryToJS) + ']';
 			}else{

@@ -35,6 +35,7 @@ exports.testFiltering = function() {
 	// ne() on re: should trigger .not(.match())
 	assert.deepEqual(executeQuery("name=match=f.*", {}, data), [data[1]]);
 	assert.deepEqual(executeQuery("name=match=glob:f*", {}, data), [data[1]]);
+	assert.deepEqual(executeQuery(new Query().match('name', /f.*/), {}, data), [data[1]]);
 };
 
 exports.testFiltering1 = function() {
