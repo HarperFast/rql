@@ -45,5 +45,13 @@ exports.testFiltering1 = function() {
 	assert.deepEqual(executeQuery("excludes(path.1,7)&sort()", {}, data), [data[0]]); // 7 found in second
 };
 
+exports.testAny = function() {
+	assert.deepEqual(executeQuery(new Query().any("tags", "even"), {}, data), [data[0]], "executeQuery supports the any operator");
+}
+
+exports.testAll = function() {
+	assert.deepEqual(executeQuery(new Query().all("tags", "fun"), {}, data), [data[1]], "executeQuery supports the all operator");
+}
+
 if (require.main === module)
     require("patr/runner").run(exports);
