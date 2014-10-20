@@ -174,20 +174,20 @@ exports.commonOperatorMap = {
 	"gt" : ">"
 }
 function stringToValue(string, parameters){
-	var converter = exports.converters['default'];
-	if(string.charAt(0) === "$"){
-		var param_index = parseInt(string.substring(1)) - 1;
-		return param_index >= 0 && parameters ? parameters[param_index] : undefined;
-	}
-	if(string.indexOf(":") > -1){
-		var parts = string.split(":",2);
-		converter = exports.converters[parts[0]];
-		if(!converter){
-			throw new URIError("Unknown converter " + parts[0]);
-		}
-		string = parts[1];
-	}
-	return converter(string);
+    var converter = exports.converters['default'];
+    if(string.charAt(0) === "$"){
+        var param_index = parseInt(string.substring(1)) - 1;
+        return param_index >= 0 && parameters ? parameters[param_index] : undefined;
+    }
+    var parts = /^(\w+):(.*)$/.exec(string);
+    if (parts && parts[1]) {
+        converter = exports.converters[parts[1]];
+        if(!converter){
+            throw new URIError("Unknown converter " + parts[0]);
+        }
+        string = parts[2];
+    }
+    return converter(string);
 };
 
 var autoConverted = exports.autoConverted = {
