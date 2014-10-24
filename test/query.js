@@ -130,34 +130,37 @@ define(function (require) {
 				tests[ group ] = test = {};
 				pairs = queryPairs [ group ];
 				for (key in pairs) {
-					test[ key ] = function () {
-						var actual = parseQuery(key),
-							expected = pairs[ key ];
-
-						if (!hasKeys(actual.cache)) {
-							delete actual.cache;
-						}
-
-						if (typeof expected === 'string') {
-							expected = parseQuery(expected);
-						}
-
-						if (!hasKeys(expected.cache)) {
-							delete expected.cache;
-						}
-
-
-						// someone decided that matching constructors is necessary for deep equality
-						// see https://github.com/theintern/intern/issues/284
-						// the deepEqual assertion also fails due to properties like toString so this assertion seems to
-						// be the most suitable.
-						assert.strictEqual(JSON.stringify(actual), JSON.stringify(expected));
-					};
+					test[ key ] = makeTest(key, pairs[ key ]);
 				}
 			}
 
 			return tests;
 		})();
+
+    function makeTest(key, pair) {
+        return function () {
+            var actual = parseQuery(key),
+                expected = pair;
+
+            if (!hasKeys(actual.cache)) {
+                delete actual.cache;
+            }
+
+            if (typeof expected === 'string') {
+                expected = parseQuery(expected);
+            }
+
+            if (!hasKeys(expected.cache)) {
+                delete expected.cache;
+            }
+
+            // someone decided that matching constructors is necessary for deep equality
+            // see https://github.com/theintern/intern/issues/284
+            // the deepEqual assertion also fails due to properties like toString so this assertion seems to
+            // be the most suitable.
+            assert.strictEqual(JSON.stringify(actual), JSON.stringify(expected));
+        };
+    }
 
 	function hasKeys(it) {
 		var key;
