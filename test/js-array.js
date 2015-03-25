@@ -42,6 +42,7 @@ define(function (require) {
 			assert.deepEqual(executeQuery('name=match=f.*', {}, data), [ data[1] ]);
 			assert.deepEqual(executeQuery('name=match=glob:f*', {}, data), [ data[1] ]);
 			assert.deepEqual(executeQuery(new Query().match('name', /f.*/), {}, data), [data[1]]);
+			assert.equal(executeQuery('sum(price)', {}, data), 15);
 		},
 
 		testFiltering1: function () {
