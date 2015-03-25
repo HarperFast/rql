@@ -18,6 +18,11 @@ define(function (require) {
 			price: 5,
 			name: 'five',
 			tags: [ 'fun' ]
+		},
+		{
+			price: 15,
+			name: 'five',
+			tags: [ 'foo' ]
 		}
 	];
 
@@ -42,6 +47,7 @@ define(function (require) {
 			assert.deepEqual(executeQuery('name=match=f.*', {}, data), [ data[1] ]);
 			assert.deepEqual(executeQuery('name=match=glob:f*', {}, data), [ data[1] ]);
 			assert.deepEqual(executeQuery(new Query().match('name', /f.*/), {}, data), [data[1]]);
+			assert.equal(executeQuery('aggregate(name,sum(price))', {}, data)[1].price, 20);
 		},
 
 		testFiltering1: function () {
