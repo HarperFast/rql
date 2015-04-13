@@ -366,6 +366,7 @@ function query(query, options, target){
 	function op(name){
 		return operators[name]||exports.missingOperator(name);
 	}
+	op.name = op.name || op.toString().match(/^function\s*([^\s(]+)/)[1];
 	var parameters = options.parameters || [];
 	var js = "";
 	function queryToJS(value){
@@ -405,7 +406,7 @@ function query(query, options, target){
 					if (value instanceof Date){
 						return value.valueOf();
 					}
-					return "(function(){return op('" + value.name + "').call(this" +
+					return "(function(){return "+op.name+"('" + value.name + "').call(this" +
 						(value && value.args && value.args.length > 0 ? (", " + each(value.args, function(value, emit){
 								emit(queryToJS(value));
 							}).join(",")) : "") +
