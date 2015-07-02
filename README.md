@@ -146,7 +146,7 @@ This module allows us to construct queries. With the query object, we could exec
 RQL operators as methods against the query object. For example:
 
     var Query = require("rql/query").Query;
-    var fooBetween3And10Query = new Query().lt("foo",3).gt("foo",10);
+    var fooBetween3And10Query = new Query().gt("foo",3).lt("foo",10);
 
 ## rql/parser
 
