@@ -126,6 +126,7 @@ for more less operators):
 * gt(&lt;property>,&lt;value>) - Filters for objects where the specified property's value is greater than the provided value
 * ge(&lt;property>,&lt;value>) - Filters for objects where the specified property's value is greater than or equal to the provided value
 * ne(&lt;property>,&lt;value>) - Filters for objects where the specified property's value is not equal to the provided value
+* match(&lt;property>,&lt;value>) - Filters for objects where the specified property's value is a regular expression match with the provided value
 * rel(&lt;relation name?>,&lt;query>) - Applies the provided query against the linked data of the provided relation name.
 * sum(&lt;property?>) - Finds the sum of every value in the array or if the property argument is provided, returns the sum of the value of property for every object in the array
 * mean(&lt;property?>) - Finds the mean of every value in the array or if the property argument is provided, returns the mean of the value of property for every object in the array
