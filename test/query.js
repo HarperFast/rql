@@ -3,7 +3,6 @@ define(function (require) {
 		assert = require('intern/chai!assert'),
 		Query = require('../query').Query,
 		parseQuery = require('../parser').parseQuery,
-		JSON = require('intern/dojo/json'),
 		supportsDateString = !isNaN(new Date('2009')),
 		queryPairs = {
 			arrays: {
