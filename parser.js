@@ -53,20 +53,20 @@ function parse(/*String|Object*/query, parameters){
 		});
 	}
 	// convert FIQL to normalized call syntax form
-	query = query.replace(/(\([\+\*\$\-:\w%\._,]+\)|[\+\*\$\-:\w%\._]*|)([<>!]?=(?:[\w]*=)?|>|<)(\([\+\*\$\-:\w%\._,]+\)|[\+\*\$\-:\w%\._]*|)/g,
-						// <---------       property        -----------><------  operator -----><----------------   value ------------------>
-			function(t, property, operator, value){
-		if(operator.length < 3){
-			if(!operatorMap[operator]){
-				throw new URIError("Illegal operator " + operator);
-			}
-			operator = operatorMap[operator];
-		}
-		else{
-			operator = operator.substring(1, operator.length - 1);
-		}
-		return operator + '(' + property + "," + value + ")";
-	});
+	// query = query.replace(/(\([\+\*\$\-:\w%\._,]+\)|[\+\*\$\-:\w%\._]*|)([<>!]?=(?:[\w]*=)?|>|<)(\([\+\*\$\-:\w%\._,]+\)|[\+\*\$\-:\w%\._]*|)/g,
+	// 					// <---------       property        -----------><------  operator -----><----------------   value ------------------>
+	// 		function(t, property, operator, value){
+	// 	if(operator.length < 3){
+	// 		if(!operatorMap[operator]){
+	// 			throw new URIError("Illegal operator " + operator);
+	// 		}
+	// 		operator = operatorMap[operator];
+	// 	}
+	// 	else{
+	// 		operator = operator.substring(1, operator.length - 1);
+	// 	}
+	// 	return operator + '(' + property + "," + value + ")";
+	// });
 	if(query.charAt(0)=="?"){
 		query = query.substring(1);
 	}

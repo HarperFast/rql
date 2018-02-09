@@ -1,5 +1,8 @@
 [![Build Status](https://travis-ci.org/persvr/rql.svg?branch=master)](https://travis-ci.org/persvr/rql)
 
+
+# RQL without FIQL support
+
 Resource Query Language (RQL) is a query language designed for use in URIs with object
 style data structures. This project includes the RQL specification and
 provides a JavaScript implementation of query

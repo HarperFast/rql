@@ -22,7 +22,7 @@ define(function (require) {
 				]}
 			},
 			'dot-comparison': {
-				'foo.bar=3': { name: 'and', args: [{ name: 'eq', args: [ 'foo.bar', 3 ]}]},
+				// 'foo.bar=3': { name: 'and', args: [{ name: 'eq', args: [ 'foo.bar', 3 ]}]},
 				'select(sub.name)': {
 					name: 'and',
 					args: [ { name: 'select', args: [ 'sub.name' ]} ],
@@ -31,44 +31,44 @@ define(function (require) {
 			},
 			equality: {
 				'eq(a,b)': { name: 'and', args:[{ name: 'eq', args: [ 'a', 'b' ]}]},
-				'a=eq=b': 'eq(a,b)',
-				'a=b': 'eq(a,b)'
+				// 'a=eq=b': 'eq(a,b)',
+				// 'a=b': 'eq(a,b)'
 			},
 			inequality: {
 				'ne(a,b)': { name: 'and', args: [{ name: 'ne', args: [ 'a', 'b' ]}]},
-				'a=ne=b': 'ne(a,b)',
-				'a!=b': 'ne(a,b)'
+				// 'a=ne=b': 'ne(a,b)',
+				// 'a!=b': 'ne(a,b)'
 			},
 			'less-than': {
 				'lt(a,b)': { name: 'and', args: [{ name: 'lt', args: [ 'a', 'b' ]}]},
-				'a=lt=b': 'lt(a,b)',
-				'a<b': 'lt(a,b)'
+				// 'a=lt=b': 'lt(a,b)',
+				// 'a<b': 'lt(a,b)'
 			},
 			'less-than-equals': {
 				'le(a,b)': { name: 'and', args: [{ name: 'le', args: [ 'a','b' ]}]},
-				'a=le=b': 'le(a,b)',
-				'a<=b': 'le(a,b)'
+				// 'a=le=b': 'le(a,b)',
+				// 'a<=b': 'le(a,b)'
 			},
 			'greater-than': {
 				'gt(a,b)': { name: 'and', args: [{ name: 'gt', args: [ 'a', 'b' ]}]},
-				'a=gt=b': 'gt(a,b)',
-				'a>b': 'gt(a,b)'
+				// 'a=gt=b': 'gt(a,b)',
+				// 'a>b': 'gt(a,b)'
 			},
 			'greater-than-equals': {
 				'ge(a,b)': { name: 'and', args: [{ name: 'ge', args: [ 'a', 'b' ]}]},
-				'a=ge=b': 'ge(a,b)',
-				'a>=b': 'ge(a,b)'
+				// 'a=ge=b': 'ge(a,b)',
+				// 'a>=b': 'ge(a,b)'
 			},
 			'nested comparisons': {
 				'a(b(le(c,d)))': { name: 'and', args: [
 					{ name: 'a', args: [{ name: 'b', args: [{ name: 'le', args: [ 'c', 'd' ]}]}]}
 				]},
-				'a(b(c=le=d))': 'a(b(le(c,d)))',
-				'a(b(c<=d))': 'a(b(le(c,d)))'
+				// 'a(b(c=le=d))': 'a(b(le(c,d)))',
+				// 'a(b(c<=d))': 'a(b(le(c,d)))'
 			},
 			'arbitrary FIQL desugaring': {
-				'a=b=c': { name: 'and', args: [{ name: 'b', args: [ 'a', 'c' ]}]},
-				'a(b=cd=e)': { name: 'and', args: [{ name: 'a', args: [{ name: 'cd', args: [ 'b', 'e' ]}]}]}
+				// 'a=b=c': { name: 'and', args: [{ name: 'b', args: [ 'a', 'c' ]}]},
+				// 'a(b=cd=e)': { name: 'and', args: [{ name: 'a', args: [{ name: 'cd', args: [ 'b', 'e' ]}]}]}
 			},
 			'and grouping': {
 				'a&b&c': { name: 'and', args: [ 'a', 'b', 'c' ]},
@@ -82,7 +82,7 @@ define(function (require) {
 			'complex grouping': {
 				'a&(b|c)': { name: 'and', args: [ 'a', { name: 'or', args: [ 'b', 'c' ]}]},
 				'a|(b&c)': { name: 'or', args: [ 'a', { name: 'and', args: [ 'b', 'c' ]}]},
-				'a(b(c<d,e(f=g)))': { 'name': 'and', 'args': [{ 'name': 'a', 'args': [{ 'name': 'b', 'args': [{ 'name': 'lt', 'args': ['c', 'd']}, {'name':'e', 'args': [{ 'name': 'eq', 'args': [ 'f', 'g' ]}]}]}]}]}
+				// 'a(b(c<d,e(f=g)))': { 'name': 'and', 'args': [{ 'name': 'a', 'args': [{ 'name': 'b', 'args': [{ 'name': 'lt', 'args': ['c', 'd']}, {'name':'e', 'args': [{ 'name': 'eq', 'args': [ 'f', 'g' ]}]}]}]}]}
 			},
 			'complex comparisons': {
 
@@ -117,10 +117,10 @@ define(function (require) {
 				'a(string:null)': { name: 'and', args: [{ name: 'a', args: [ 'null' ]}]}
 			},
 			'complex coercion': {
-				'(a=b|c=d)&(e=f|g=1)': { name: 'and', args: [
-					{ name: 'or', args: [{ name: 'eq', args: [ 'a', 'b' ]}, { name: 'eq', args: [ 'c', 'd' ]}]},
-					{ name: 'or', args: [{ name: 'eq', args: [ 'e', 'f' ]}, { name: 'eq', args: [ 'g', 1 ]}]}
-				]}
+				// '(a=b|c=d)&(e=f|g=1)': { name: 'and', args: [
+				// 	{ name: 'or', args: [{ name: 'eq', args: [ 'a', 'b' ]}, { name: 'eq', args: [ 'c', 'd' ]}]},
+				// 	{ name: 'or', args: [{ name: 'eq', args: [ 'e', 'f' ]}, { name: 'eq', args: [ 'g', 1 ]}]}
+				// ]}
 			}
 		},
 		testParsing = (function () {
@@ -193,7 +193,7 @@ define(function (require) {
 		testBehavior: function () {
 			//assert.error(parseQuery(), "parseQuery requires a string");
 			assert.ok(parseQuery('') instanceof Query, 'should inherit from Query');
-			assert.ok(parseQuery('a=b') instanceof Query, 'should inherit from Query');
+			// assert.ok(parseQuery('a=b') instanceof Query, 'should inherit from Query');
 			//assert.error(parseQuery('?a=b'), 'cannot begin with a ?');
 		},
 
