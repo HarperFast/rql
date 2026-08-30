@@ -214,6 +214,13 @@ Coercive comparators convert value tokens as follows:
 Exactly these call functions are Core; an unrecognized call name is a parse error
 (unlike comparator names, which are open):
 
+> **Break from 1.x:** in RQL 1.x, call syntax was the *normalized form* of every
+> operator — `lt(price,10)` was equivalent to `price=lt=10`, and infix forms were sugar.
+> In 2.0 the categories are disjoint: comparators are infix-only with an open name set
+> (§5.1.2), and call syntax is reserved for this closed set of result-shaping functions.
+> `lt(price,10)` is a parse error. The anonymous group `(...)` (§5.4) is the one place
+> call syntax still yields conditions.
+
 | Function | Semantics |
 |---|---|
 | `select(...)` | Projection. Four shapes: `select(a)` → scalar values of `a`; `select(a,b)` → objects with those properties (`select(a,)` for a one-property object); `select([a,b])` → rows as arrays; sub-selects `rel{a,b}` or `rel[select(a,b)]` project into related/nested objects. |
@@ -316,6 +323,8 @@ injection via property paths into schema-less stores, regex-free matching guaran
 
 | Area | RQL 1.x | RQL 2.0 |
 |---|---|---|
+| Operator model | one category: call form `op(args)` is the normalized form of everything; infix is sugar | two disjoint categories: infix-only comparators (open set, execution-validated) vs. call-only result-shaping functions (closed set, parse-validated) |
+| `lt(price,10)` etc. | valid, ≡ `price=lt=10` | parse error — comparators have no call form |
 | `prop=value` | coercive `eq` | **strict** `equals`; use `==` for coercion |
 | `limit` | `limit(count,start,maxCount)` | `limit(end)` / `limit(start,end)` |
 | Nested paths | `foo/bar`, `(foo,bar)` | `foo.bar` |
