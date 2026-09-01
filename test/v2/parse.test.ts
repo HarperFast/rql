@@ -229,21 +229,21 @@ describe('Chaining desugaring', () => {
 	});
 
 	// Semantic motivation: chained vs un-chained are different for list-valued properties.
-	it('chained vs un-chained produce different canonical shapes (ski-lengths)', () => {
-		// Chained: some ONE skiLength value must be in [175,180].
-		const chained = parseQuery('skiLengths=ge=175&=le=180');
-		// Un-chained: some element ≥175 AND some (possibly different) element ≤180.
-		const unchained = parseQuery('skiLengths=ge=175&skiLengths=le=180');
+	it('chained vs un-chained produce different canonical shapes (ratings)', () => {
+		// Chained: some ONE rating must be in [3,4].
+		const chained = parseQuery('ratings=ge=3&=le=4');
+		// Un-chained: some element ≥3 AND some (possibly different) element ≤4.
+		const unchained = parseQuery('ratings=ge=3&ratings=le=4');
 
 		const em = chained.filter!.terms[0] as ElementMatch;
-		assert.deepEqual(em.path, ['skiLengths']);
+		assert.deepEqual(em.path, ['ratings']);
 		assert.equal(em.some.operator, 'and');
 		assert.deepEqual((em.some.terms[0] as Condition).path, []);
 		assert.deepEqual((em.some.terms[1] as Condition).path, []);
 
 		assert.equal(unchained.filter!.terms.length, 2);
-		assert.deepEqual((unchained.filter!.terms[0] as Condition).path, ['skiLengths']);
-		assert.deepEqual((unchained.filter!.terms[1] as Condition).path, ['skiLengths']);
+		assert.deepEqual((unchained.filter!.terms[0] as Condition).path, ['ratings']);
+		assert.deepEqual((unchained.filter!.terms[1] as Condition).path, ['ratings']);
 
 		assert.notDeepEqual(chained.filter, unchained.filter);
 	});
@@ -595,24 +595,24 @@ describe('Chain legs require a comparator name (§4 grammar)', () => {
 });
 
 describe('Chaining inside groups keeps element scoping (§5.3)', () => {
-	it('(skiLengths=ge=175&=le=180) → ElementMatch, same as un-grouped', () => {
-		const grouped = parseQuery('(skiLengths=ge=175&=le=180)');
+	it('(ratings=ge=3&=le=4) → ElementMatch, same as un-grouped', () => {
+		const grouped = parseQuery('(ratings=ge=3&=le=4)');
 		const inner = grouped.filter!.terms[0] as Group;
 		const em = inner.terms[0] as ElementMatch;
 		assert.deepEqual(em, {
-			path: ['skiLengths'],
+			path: ['ratings'],
 			some: { operator: 'and', terms: [
-				{ path: [], comparator: 'ge', value: 175 },
-				{ path: [], comparator: 'le', value: 180 },
+				{ path: [], comparator: 'ge', value: 3 },
+				{ path: [], comparator: 'le', value: 4 },
 			] },
 		});
 	});
 
 	it('chained legs inside a bracket scoped-match stay grouped', () => {
-		const r = parseQuery('a=1&[skiLengths=ge=175&=le=180]');
+		const r = parseQuery('a=1&[ratings=ge=3&=le=4]');
 		const grp = r.filter!.terms[1] as Group;
 		const em = grp.terms[0] as ElementMatch;
-		assert.deepEqual(em.path, ['skiLengths']);
+		assert.deepEqual(em.path, ['ratings']);
 		assert.equal(em.some.terms.length, 2);
 	});
 });
@@ -627,5 +627,241 @@ describe('Nested projections are records mode (§5.7)', () => {
 				{ path: ['brand'], projection: { mode: 'records', fields: [{ path: ['name'] }] } },
 			],
 		});
+	});
+});
+
+// ---------------------------------------------------------------------------
+// §5.3 Negated-inner flattening exemption
+// ---------------------------------------------------------------------------
+
+describe('Negated-inner ElementMatch is NOT flattened (§5.3)', () => {
+	it('tags[=not_eq=urgent] stays an ElementMatch (∃¬ ≠ ¬∃)', () => {
+		const r = parseQuery('tags[=not_eq=urgent]');
+		const em = r.filter!.terms[0] as ElementMatch;
+		assert.ok('some' in em, 'should remain an ElementMatch, not flatten to a Condition');
+		assert.deepEqual(em.path, ['tags']);
+		assert.equal(em.some.terms.length, 1);
+		const ic = em.some.terms[0] as Condition;
+		assert.deepEqual(ic.path, []);
+		assert.equal(ic.comparator, 'eq');
+		assert.equal(ic.negated, true);
+		assert.equal(ic.value, 'urgent');
+		assert.equal(em.negated, undefined);
+	});
+
+	it('orders[status=open] flattens to plain Condition (single non-negated)', () => {
+		const r = parseQuery('orders[status=open]');
+		// Single non-negated inner condition → normalized to plain Condition.
+		const c = r.filter!.terms[0] as Condition;
+		assert.ok(!('some' in c), 'should flatten to a plain Condition');
+		assert.deepEqual(c.path, ['orders', 'status']);
+		assert.equal(c.comparator, 'eq');
+	});
+});
+
+// ---------------------------------------------------------------------------
+// §4 Elem-cond surface inside prop[...]
+// ---------------------------------------------------------------------------
+
+describe('Element-scoped match (prop[...])', () => {
+	it('scores[=ge=10] → ElementMatch with elem-cond path=[]', () => {
+		const r = parseQuery('scores[=ge=10]');
+		const em = r.filter!.terms[0] as ElementMatch;
+		assert.ok('some' in em);
+		assert.deepEqual(em.path, ['scores']);
+		const ic = em.some.terms[0] as Condition;
+		assert.deepEqual(ic.path, []);
+		assert.equal(ic.comparator, 'ge');
+		assert.equal(ic.value, 10);
+	});
+
+	it('scores[=ge=10|=le=2] → ElementMatch with two elem-conds (or)', () => {
+		const r = parseQuery('scores[=ge=10|=le=2]');
+		const em = r.filter!.terms[0] as ElementMatch;
+		assert.deepEqual(em.path, ['scores']);
+		assert.equal(em.some.operator, 'or');
+		assert.equal(em.some.terms.length, 2);
+		assert.deepEqual((em.some.terms[0] as Condition).path, []);
+		assert.equal((em.some.terms[0] as Condition).comparator, 'ge');
+		assert.deepEqual((em.some.terms[1] as Condition).path, []);
+		assert.equal((em.some.terms[1] as Condition).comparator, 'le');
+	});
+
+	it('reviews[rating=ge=4&helpful=ge=10] → ElementMatch with two named conditions', () => {
+		const r = parseQuery('reviews[rating=ge=4&helpful=ge=10]');
+		const em = r.filter!.terms[0] as ElementMatch;
+		assert.deepEqual(em.path, ['reviews']);
+		assert.equal(em.some.operator, 'and');
+		assert.equal(em.some.terms.length, 2);
+		const ic0 = em.some.terms[0] as Condition;
+		const ic1 = em.some.terms[1] as Condition;
+		assert.deepEqual(ic0.path, ['rating']);
+		assert.equal(ic0.comparator, 'ge');
+		assert.equal(ic0.value, 4);
+		assert.deepEqual(ic1.path, ['helpful']);
+		assert.equal(ic1.comparator, 'ge');
+		assert.equal(ic1.value, 10);
+	});
+
+	it('tags[=not_eq=urgent] (negated elem-cond) is not flattened', () => {
+		const r = parseQuery('tags[=not_eq=urgent]');
+		assert.ok('some' in r.filter!.terms[0], 'must remain ElementMatch');
+		const em = r.filter!.terms[0] as ElementMatch;
+		const ic = em.some.terms[0] as Condition;
+		assert.equal(ic.negated, true);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// §5.2.2 Malformed typed literals are syntax errors
+// ---------------------------------------------------------------------------
+
+describe('Parse errors — malformed typed literals (§5.2.2)', () => {
+	it('boolean:yes throws', () => {
+		assert.throws(() => parseQuery('x==boolean:yes'), /malformed boolean literal/);
+	});
+
+	it('boolean: (empty) throws', () => {
+		assert.throws(() => parseQuery('x==boolean:'), /malformed boolean literal/);
+	});
+
+	it('number:abc throws', () => {
+		assert.throws(() => parseQuery('x==number:abc'), /malformed number literal/);
+	});
+
+	it('number: (empty) throws', () => {
+		assert.throws(() => parseQuery('x==number:'), /malformed number literal/);
+	});
+
+	it('date:not-a-date throws', () => {
+		assert.throws(() => parseQuery('x==date:not-a-date'), /malformed date literal/);
+	});
+
+	it('valid boolean:true does not throw', () => {
+		assert.doesNotThrow(() => parseQuery('x==boolean:true'));
+	});
+
+	it('valid number:42 does not throw', () => {
+		assert.doesNotThrow(() => parseQuery('x==number:42'));
+	});
+});
+
+// ---------------------------------------------------------------------------
+// §5.6 Limit validation
+// ---------------------------------------------------------------------------
+
+describe('Parse errors — limit validation (§5.6)', () => {
+	it('limit(10,5) throws — end < start', () => {
+		assert.throws(() => parseQuery('limit(10,5)'), /limit/);
+	});
+
+	it('limit(-1) throws — negative', () => {
+		assert.throws(() => parseQuery('limit(-1)'), /non-negative integer/);
+	});
+
+	it('limit(1.5) throws — non-integer', () => {
+		assert.throws(() => parseQuery('limit(1.5)'), /non-negative integer/);
+	});
+
+	it('limit(foo) throws — non-numeric', () => {
+		assert.throws(() => parseQuery('limit(foo)'), /non-negative integer/);
+	});
+
+	it('limit(0) is valid', () => {
+		const r = parseQuery('limit(0)');
+		assert.equal(r.limit, 0);
+	});
+
+	it('limit(0,10) is valid — offset=0, limit=10', () => {
+		const r = parseQuery('limit(0,10)');
+		assert.equal(r.offset, 0);
+		assert.equal(r.limit, 10);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// §5.6 Duplicate call functions
+// ---------------------------------------------------------------------------
+
+describe('Parse errors — duplicate call functions (§5.6)', () => {
+	it('two select() calls throw', () => {
+		assert.throws(() => parseQuery('select(id)&select(name)'), /duplicate select/);
+	});
+
+	it('two sort() calls throw', () => {
+		assert.throws(() => parseQuery('sort(name)&sort(age)'), /duplicate sort/);
+	});
+
+	it('two limit() calls throw', () => {
+		assert.throws(() => parseQuery('limit(10)&limit(5)'), /duplicate limit/);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// §4 Chained value lists — &=in= and &=between= pin tests
+// ---------------------------------------------------------------------------
+
+describe('Chained value lists (§4)', () => {
+	it('a=ge=1&=in=(2,3) parses without error', () => {
+		const r = parseQuery('a=ge=1&=in=(2,3)');
+		// Produces an ElementMatch on 'a' with ge+in legs.
+		const em = r.filter!.terms[0] as ElementMatch;
+		assert.deepEqual(em.path, ['a']);
+		assert.equal(em.some.operator, 'and');
+		assert.equal(em.some.terms.length, 2);
+		const leg0 = em.some.terms[0] as Condition;
+		const leg1 = em.some.terms[1] as Condition;
+		assert.equal(leg0.comparator, 'ge');
+		assert.equal(leg0.value, 1);
+		assert.equal(leg1.comparator, 'in');
+		assert.deepEqual(leg1.value, [2, 3]);
+	});
+
+	it('a=ge=1&=between=(2,3) parses — between legs fold into the ElementMatch', () => {
+		// The between desugars into ge+le inner conditions inside the same ElementMatch.
+		const r = parseQuery('a=ge=1&=between=(2,3)');
+		assert.ok(r.filter);
+		// At minimum we get an ElementMatch on 'a'.
+		const em = r.filter!.terms[0] as ElementMatch;
+		assert.deepEqual(em.path, ['a']);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// §5.7 Nested tuple projection reserved
+// ---------------------------------------------------------------------------
+
+describe('Nested tuple projection reserved (§5.7)', () => {
+	it('select(rel{[x,y]}) throws', () => {
+		assert.throws(() => parseQuery('select(rel{[x,y]})'), /nested.*tuple.*reserved/);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// §4.2 rule 4 Raw-token marker pins
+// ---------------------------------------------------------------------------
+
+describe('Raw-token marker pins (§4.2 rule 4)', () => {
+	it('x==string%3Anull → plain string "string:null" (encoded colon is not a type prefix)', () => {
+		const r = parseQuery('x==string%3Anull');
+		const c = r.filter!.terms[0] as Condition;
+		assert.equal(c.value, 'string:null');
+	});
+
+	it('name==Jo%2A → eq "Jo*" (encoded asterisk is not a wildcard)', () => {
+		const r = parseQuery('name==Jo%2A');
+		const c = r.filter!.terms[0] as Condition;
+		assert.equal(c.comparator, 'eq');
+		assert.equal(c.value, 'Jo*');
+	});
+
+	it('sort(%2Bname) → path ["+name"] ascending (encoded + is not a direction marker)', () => {
+		const r = parseQuery('sort(%2Bname)');
+		assert.deepEqual(r.sort, [{ path: ['+name'], direction: 'asc' }]);
+	});
+
+	it('sort(-age) → path ["age"] descending (raw - IS a direction marker)', () => {
+		const r = parseQuery('sort(-age)');
+		assert.deepEqual(r.sort, [{ path: ['age'], direction: 'desc' }]);
 	});
 });

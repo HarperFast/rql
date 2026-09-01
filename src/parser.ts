@@ -6,9 +6,7 @@ import type {
 
 // QP: tokenises attribute names and structural operators.
 // VP: tokenises value tokens (includes ( ) , as plain chars; excludes & | = [ ] { }).
-// Both are created fresh per parseQuery call for reentrancy.
-// [&|]= first: the chain operators are two-char tokens and must win over
-// the single-char structural match.
+// [&|]= wins over single-char structural match — chain/elem operators are two-char tokens.
 const QP_SRC = '([^?&|=<>!([{\\}\\]),]*)([&|]=|[([{\\}\\])|,&]|[=<>!]*)';
 const VP_SRC = '([^&|=\\[\\]{}]*)([\\[\\]{}]|[&|=]*)';
 
@@ -25,15 +23,24 @@ function interpretValue(token: string): Value {
 		const type = token.slice(0, colon);
 		const rest = token.slice(colon + 1);
 		switch (type) {
-			case 'number':  return rest[0] === '$' ? parseInt(rest.slice(1), 36) : +rest;
-			case 'boolean': return rest === 'true';
-			case 'date':    return new Date(isNaN(+rest) ? decodeURIComponent(rest) : +rest);
+			case 'number': {
+				const n = rest[0] === '$' ? parseInt(rest.slice(1), 36) : (rest === '' ? NaN : +rest);
+				if (isNaN(n)) throw new QueryError(`malformed number literal '${token}'`);
+				return n;
+			}
+			case 'boolean':
+				if (rest !== 'true' && rest !== 'false') throw new QueryError(`malformed boolean literal '${token}'`);
+				return rest === 'true';
+			case 'date': {
+				const d = new Date(isNaN(+rest) ? decodeURIComponent(rest) : +rest);
+				if (isNaN(d.getTime())) throw new QueryError(`malformed date literal '${token}'`);
+				return d;
+			}
 			case 'string':  return decodeURIComponent(rest);
 			default: throw new QueryError(`Unknown type prefix '${type}'`);
 		}
 	}
-	// §5.2.2: decimal numerals auto-convert in interpreted mode (round-trip rule),
-	// keeping interpreted `a==3` distinct from verbatim `a=3`.
+	// §5.2.2: round-trip decimal numerals auto-convert in interpreted mode.
 	const n = +token;
 	if (token !== '' && !isNaN(n) && String(n) === token) return n;
 	return decodeURIComponent(token);
@@ -62,7 +69,7 @@ function makeCondition(
 }
 
 function parseListRaw(raw: string, verbatim: boolean): Value[] {
-	const inner = raw.slice(1, -1); // strip ( )
+	const inner = raw.slice(1, -1);
 	if (inner.length === 0) return [];
 	const decode = verbatim ? verbatimValue : interpretValue;
 	return inner.split(',').map(decode);
@@ -79,6 +86,14 @@ function betweenMatch(path: string[], raw: string, negated: boolean): ElementMat
 	const em: ElementMatch = { path, some: { operator: 'and', terms: [ge, le] } };
 	if (negated) em.negated = true;
 	return em;
+}
+
+/** §5.6: limit args must be non-negative decimal integers. */
+function parseNonNegInt(s: string): number {
+	const n = +s;
+	if (!Number.isInteger(n) || n < 0 || String(n) !== s)
+		throw new QueryError(`limit argument must be a non-negative integer: '${s}'`);
+	return n;
 }
 
 // ── Group accumulator ──────────────────────────────────────────────────────
@@ -104,14 +119,15 @@ function accToGroup(acc: Acc): Group | undefined {
 	return { operator: acc.operator ?? 'and', terms: acc.terms };
 }
 
-// §6 invariant: an ElementMatch scoping a single plain condition normalizes to an
-// ordinary Condition with the concatenated path.
+// §6 invariant: an ElementMatch scoping exactly one plain non-negated named-path condition
+// normalizes to an ordinary Condition on the concatenated path. Negated inner conditions
+// are never flattened (∃¬ ≠ ¬∃, §5.1.1 / §5.3). Elem-conds (ic.path=[]) are never
+// flattened — merging would drop the existential quantifier.
 function pushElementMatch(acc: Acc, em: ElementMatch): void {
 	const t = em.some.terms;
-	if (t.length === 1 && !('some' in t[0]) && !('terms' in t[0]) && !em.negated) {
+	if (t.length === 1 && !('some' in t[0]) && !('terms' in t[0]) && !em.negated && !(t[0] as Condition).negated && (t[0] as Condition).path.length > 0) {
 		const ic = t[0] as Condition;
 		const merged: Condition = { path: [...em.path, ...ic.path], comparator: ic.comparator, value: ic.value };
-		if (ic.negated) merged.negated = true;
 		acc.terms.push(merged);
 		acc.lastPath = merged.path;
 	} else {
@@ -137,10 +153,10 @@ export function parseQuery(search: string, options?: ParseOptions): ParseResult 
 	}
 
 	// ── Condition-group parser ─────────────────────────────────────────────
-	// Always uses QP (FIQL works because QP sees both `=` tokens sequentially).
-	// Call functions NOT dispatched here.
+	// Always uses QP. When isScoped=true (prop[...] body), elem-conds (=name=val) are
+	// accepted with an empty implicit path, and &=/|= decompose to conjunction + elem-cond.
 
-	function parseCondGroup(closeCh: string): Acc {
+	function parseCondGroup(closeCh: string, isScoped = false): Acc {
 		const acc = newAcc();
 		let path: string[] | undefined;
 		let rawComp: string | undefined;
@@ -203,7 +219,6 @@ export function parseQuery(search: string, options?: ParseOptions): ParseResult 
 				acc.terms.push(term);
 			}
 			path = undefined; rawComp = undefined; fiqlMode = false;
-			// chainPath / activeEM persist across chain legs.
 		}
 
 		qp.lastIndex = pos;
@@ -215,11 +230,15 @@ export function parseQuery(search: string, options?: ParseOptions): ParseResult 
 			switch (op) {
 				case '=':
 					if (path !== undefined) {
+						// Second `=` of FIQL.
 						if (!FIQL_NAME.test(val)) { recordError(`invalid FIQL name '${val}'`); break; }
 						rawComp = val; fiqlMode = true;
 					} else if (chainPath) {
 						if (!FIQL_NAME.test(val)) { recordError(`invalid FIQL name '${val}'`); break; }
 						path = chainPath; rawComp = val; fiqlMode = true;
+					} else if (isScoped && !val) {
+						// elem-cond: `=fiql-name=value` with no explicit property path.
+						path = []; rawComp = '='; fiqlMode = false;
 					} else {
 						if (!val) { recordError('path required before ='); break; }
 						path = splitPath(val); rawComp = '='; fiqlMode = false;
@@ -242,8 +261,16 @@ export function parseQuery(search: string, options?: ParseOptions): ParseResult 
 				}
 				case '&=': case '|=': {
 					const cop: 'and' | 'or' = op === '&=' ? 'and' : 'or';
-					if (path !== undefined) finishCond(val);
-					if (activeEM) {
+					const hadPending = path !== undefined;
+					if (hadPending) finishCond(val);
+					// In a scoped-body, &=/|= after an elem-cond (lastPath=[]) is a
+					// conjunction + new elem-cond start, not a chain operator.
+					const lastIsElemCond = acc.lastPath !== undefined && acc.lastPath.length === 0;
+					if (isScoped && lastIsElemCond && !activeEM) {
+						closeEM();
+						setGroupOp(acc, cop, recordError);
+						path = []; rawComp = '='; fiqlMode = false;
+					} else if (activeEM) {
 						if (cop !== activeEM.some.operator) recordError('cannot mix & and | within a chain');
 					} else {
 						const prev = acc.terms.pop();
@@ -279,23 +306,27 @@ export function parseQuery(search: string, options?: ParseOptions): ParseResult 
 				}
 				case '[': {
 					if (val) {
+						// prop[...] scoped-match.
 						const ePath = splitPath(val);
 						qp.lastIndex = pos;
-						const inner = parseCondGroup(']');
+						const inner = parseCondGroup(']', true);
 						pos = qp.lastIndex;
 						const innerGrp = accToGroup(inner);
 						if (!innerGrp) {
 							recordError(`empty bracket group for '${val}'`);
+						} else if (innerGrp.terms.length === 1 && !('some' in innerGrp.terms[0]) && !('terms' in innerGrp.terms[0]) && !(innerGrp.terms[0] as Condition).negated && (innerGrp.terms[0] as Condition).path.length > 0) {
+							const ic = innerGrp.terms[0] as Condition;
+							const merged: Condition = { path: [...ePath, ...ic.path], comparator: ic.comparator, value: ic.value };
+							closeEM(); acc.terms.push(merged); acc.lastPath = merged.path;
 						} else {
-							closeEM();
-							pushElementMatch(acc, { path: ePath, some: innerGrp });
+							closeEM(); pushElementMatch(acc, { path: ePath, some: innerGrp });
 						}
 					} else {
 						qp.lastIndex = pos;
 						const inner = parseCondGroup(']');
 						pos = qp.lastIndex;
 						const grp = accToGroup(inner);
-						if (grp) { acc.terms.push(grp); acc.lastPath = undefined; }
+						if (grp) { closeEM(); acc.terms.push(grp); acc.lastPath = undefined; }
 					}
 					break;
 				}
@@ -323,8 +354,6 @@ export function parseQuery(search: string, options?: ParseOptions): ParseResult 
 	}
 
 	// ── Top-level parser ───────────────────────────────────────────────────
-	// QP/VP switching: VP only when committed to reading a value (FIQL or non-eq op seen).
-	// Chaining and between produce ElementMatch.
 
 	const result: ParseResult = {};
 	const topAcc = newAcc();
@@ -333,9 +362,9 @@ export function parseQuery(search: string, options?: ParseOptions): ParseResult 
 	let fiqlMode = false;
 	let chainPath: string[] | undefined;
 	let activeEM: ElementMatch | undefined;
+	const seenCalls = new Set<string>();
 
 	function useVP(): boolean {
-		// Use VP only after we have path + a comparator that won't be FIQL second-=.
 		return path !== undefined && rawComp !== undefined && (fiqlMode || rawComp !== '=');
 	}
 
@@ -390,7 +419,6 @@ export function parseQuery(search: string, options?: ParseOptions): ParseResult 
 		}
 
 		path = undefined; rawComp = undefined; fiqlMode = false;
-		// chainPath / activeEM persist across chain legs.
 	}
 
 	function closeActiveEM(): void {
@@ -468,7 +496,9 @@ export function parseQuery(search: string, options?: ParseOptions): ParseResult 
 			}
 			if (op === '{') {
 				const nested = parseSelectList('}');
-				p.lastIndex = pos; // re-sync after recursive call updates shared pos
+				p.lastIndex = pos;
+				// §5.7: nested '[...]' tuple form inside '{}' is reserved.
+				if (nested.some(f => f.tuple)) recordError("nested '[...]' tuple inside '{}' is reserved");
 				fields.push({ path: splitPath(val), nested });
 				continue;
 			}
@@ -489,12 +519,11 @@ export function parseQuery(search: string, options?: ParseOptions): ParseResult 
 				} else {
 					// `[a,b]` → tuple.
 					const items = parseSelectList(']');
-					p.lastIndex = pos; // re-sync after recursive call updates shared pos
+					p.lastIndex = pos;
 					fields.push({ path: [], nested: items, tuple: true });
 				}
 				continue;
 			}
-			// Unrecognised structural op or empty string: treat val as field name.
 			if (val) fields.push({ path: splitPath(val) });
 			if (!op && pos >= search.length) { recordError(`expected '${closeCh}' for select`); return fields; }
 		}
@@ -507,8 +536,6 @@ export function parseQuery(search: string, options?: ParseOptions): ParseResult 
 			return { mode: 'tuples', fields: (fields[0].nested ?? []).map(rawToField) };
 		}
 		const fs = fields.map(rawToField);
-		// The single-field `values` mode is a top-level surface form only (§5.7);
-		// nested projections trim the object (`records`), matching sub-select semantics.
 		const mode: 'values' | 'records' =
 			(!nested && fs.length === 1 && !fields[0].nested && !trailingComma) ? 'values' : 'records';
 		return { mode, fields: fs };
@@ -538,9 +565,7 @@ export function parseQuery(search: string, options?: ParseOptions): ParseResult 
 		const [, val, op] = match;
 
 		if (p === vp) {
-			// Value token consumed.
 			finishTopCond(val);
-			// Process any logical separator carried by VP.
 			switch (op) {
 				case '&': case '|': {
 					const lop: 'and' | 'or' = op === '&' ? 'and' : 'or';
@@ -549,7 +574,6 @@ export function parseQuery(search: string, options?: ParseOptions): ParseResult 
 					break;
 				}
 				case '&=': case '|=': {
-					// Chain operator: start or extend an ElementMatch.
 					const cop: 'and' | 'or' = op === '&=' ? 'and' : 'or';
 					if (activeEM) {
 						if (cop !== activeEM.some.operator) recordError('cannot mix & and | within a chain');
@@ -577,7 +601,6 @@ export function parseQuery(search: string, options?: ParseOptions): ParseResult 
 		switch (op) {
 			case '=':
 				if (path !== undefined) {
-					// Second `=` of FIQL.
 					if (!FIQL_NAME.test(val)) { recordError(`invalid FIQL name '${val}'`); break; }
 					rawComp = val; fiqlMode = true;
 				} else if (chainPath) {
@@ -610,7 +633,8 @@ export function parseQuery(search: string, options?: ParseOptions): ParseResult 
 					if (cop !== activeEM.some.operator) recordError('cannot mix & and | within a chain');
 				} else {
 					const prev = topAcc.terms.pop();
-					if (!prev || 'some' in prev) {
+					if (!prev || 'some' in prev || 'terms' in prev) {
+						if (prev) topAcc.terms.push(prev);
 						recordError('no preceding Condition to chain onto'); break;
 					}
 					const prevCond = prev as Condition;
@@ -631,23 +655,45 @@ export function parseQuery(search: string, options?: ParseOptions): ParseResult 
 				break;
 			case '(': {
 				if (val) {
-					switch (val) {
-						case 'select':  result.select = parseSelectArgs();   break;
-						case 'sort':    result.sort = parseSortArgs();        break;
-						case 'limit': {
-							const args = parsePlainArgs('limit');
-							if (args.length === 1) result.limit = +args[0];
-							else if (args.length === 2) { result.offset = +args[0]; result.limit = +args[1] - result.offset; }
-							else recordError('limit takes 1 or 2 arguments');
-							break;
+					if (seenCalls.has(val)) {
+						// Consume args and record duplicate error.
+						if (val === 'select') parseSelectArgs();
+						else if (val === 'sort') parseSortArgs();
+						else parsePlainArgs(val);
+						recordError(`duplicate ${val}()`);
+					} else {
+						seenCalls.add(val);
+						switch (val) {
+							case 'select':  result.select = parseSelectArgs();   break;
+							case 'sort':    result.sort = parseSortArgs();        break;
+							case 'limit': {
+								const args = parsePlainArgs('limit');
+								try {
+									if (args.length === 1) {
+										result.limit = parseNonNegInt(args[0]);
+									} else if (args.length === 2) {
+										const start = parseNonNegInt(args[0]);
+										const end = parseNonNegInt(args[1]);
+										if (end < start) throw new QueryError(`limit end ${end} must be ≥ start ${start}`);
+										result.offset = start;
+										result.limit = end - start;
+									} else {
+										recordError('limit takes 1 or 2 arguments');
+									}
+								} catch (e) {
+									if (e instanceof QueryError) recordError(e.message);
+									else throw e;
+								}
+								break;
+							}
+							case 'group-by':
+								parsePlainArgs('group-by');
+								recordError('group-by is not implemented');
+								break;
+							default:
+								parsePlainArgs(val);
+								recordError(`unknown call function '${val}'`);
 						}
-						case 'group-by':
-							parsePlainArgs('group-by');
-							recordError('group-by is not implemented');
-							break;
-						default:
-							parsePlainArgs(val);
-							recordError(`unknown call function '${val}'`);
 					}
 					if (search[pos] === ',') pos++;
 					path = undefined; chainPath = undefined;
@@ -666,18 +712,17 @@ export function parseQuery(search: string, options?: ParseOptions): ParseResult 
 				if (val) {
 					const ePath = splitPath(val);
 					qp.lastIndex = pos;
-					const inner = parseCondGroup(']');
+					const inner = parseCondGroup(']', true);
 					pos = qp.lastIndex;
 					const innerGrp = accToGroup(inner);
 					if (!innerGrp) {
 						recordError(`empty bracket group for '${val}'`);
-					} else if (innerGrp.terms.length === 1 && !('some' in innerGrp.terms[0])) {
+					} else if (innerGrp.terms.length === 1 && !('some' in innerGrp.terms[0]) && !('terms' in innerGrp.terms[0]) && !(innerGrp.terms[0] as Condition).negated && (innerGrp.terms[0] as Condition).path.length > 0) {
 						const ic = innerGrp.terms[0] as Condition;
 						const merged: Condition = { path: [...ePath, ...ic.path], comparator: ic.comparator, value: ic.value };
-						if (ic.negated) merged.negated = true;
 						closeActiveEM(); topAcc.terms.push(merged); topAcc.lastPath = merged.path;
 					} else {
-						closeActiveEM(); topAcc.terms.push({ path: ePath, some: innerGrp }); topAcc.lastPath = ePath;
+						closeActiveEM(); pushElementMatch(topAcc, { path: ePath, some: innerGrp });
 					}
 					if (search[pos] === ',') pos++;
 					path = undefined; chainPath = undefined;
