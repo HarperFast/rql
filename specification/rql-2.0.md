@@ -650,7 +650,9 @@ Honest gaps, recorded rather than mapped away:
 - **Operator configuration arguments** — `phfts(english).The%20Fat%20Cats` carries a
   full-text-search configuration, but `Condition` has no operator-argument slot. A
   dialect front-end can preserve it in the opaque extension comparator name
-  (`phfts(english)`); a future revision could model arguments separately.
+  (`phfts(english)`); that spelling falls outside §4's `fiql-name` grammar and does
+  not round-trip through §7 serialization. A future revision could model arguments
+  separately.
 - **Null ordering** — `order=age.nullsfirst`. `SortKey` (§6) has no nulls placement;
   reserved for a future revision.
 - **Aggregates in projections** — `select=amount.sum()`; RQL keeps aggregation in the
