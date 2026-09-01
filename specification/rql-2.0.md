@@ -76,13 +76,17 @@ query          = [ group-body ] *( "&" call )
 group-body     = term *( conjunction term )
                ; all conjunctions within one group-body MUST be identical (§5.4)
 conjunction    = "&" / "|"
-term           = condition / chained-cond / group
+term           = condition / chained-cond / group / scoped-match
 group          = "(" group-body ")" / "[" group-body "]"
+scoped-match   = prop-path "[" group-body "]"
+               ; element-scoped sub-query over the values at prop-path (§5.3);
+               ; inner paths are element-relative
 
 condition      = prop-path symbol-op value
                / prop-path "=" fiql-name "=" ( value / value-list )
-chained-cond   = ( "&=" / "|=" ) [ fiql-name "=" ] value
-               ; continues the preceding condition's property path (§5.3)
+chained-cond   = ( "&=" / "|=" / "=" ) fiql-name "=" ( value / value-list )
+               ; continues the preceding condition, scoped to the same element (§5.3);
+               ; the bare "=" spelling is an and-continuation
 
 symbol-op      = "=" / "==" / "===" / "!=" / "!==" / "<" / "<=" / ">" / ">="
 fiql-name      = ALPHA-UNDER *( ALPHA-UNDER / DIGIT )
@@ -219,20 +223,47 @@ convert the parsed value to the schema type at binding time in either mode.
 | any other token | percent-decoded string |
 | unknown `type:` prefix | error (client error, HTTP 400) |
 
-### 5.3 Range chaining
+### 5.3 Element-scoped matching and range chaining
 
-`&=` and `|=` chain an additional comparison onto the *preceding condition's property
-path*:
+A condition on a list-valued property matches existentially — if **any** element
+matches (§5.5). Because conjunction does not distribute over that quantifier, RQL
+provides *element scoping*: a way to require that several comparisons hold for the
+**same** element.
+
+**Chaining** continues the preceding condition, scoped to the same element. Three
+spellings: `&=` (and), `|=` (or), and a bare `=` continuation (and):
 
 ```
-age=ge=20&=le=30        ; 20 ≤ age ≤ 30
+skiLengths=ge=175&=le=180       ; some ONE length is in [175, 180]
+skiLengths=ge=175=le=180        ; identical (bare "=" and-continuation, new in 2.0)
+skiLengths=ge=175&skiLengths=le=180
+                                ; DIFFERENT: some length ≥ 175 AND some
+                                ; (possibly other) length ≤ 180
 ```
 
-Chaining is pure surface sugar: it desugars to ordinary conditions on the same path,
-combined with the corresponding logical operator. `age=ge=20&=le=30` is canonically an
-`and` group containing `ge(age,20)` and `le(age,30)`. Executors are encouraged to
-recognize same-path `ge`/`gt` + `le`/`lt` pairs and execute them as a single range scan,
-but that is an optimization, not a representation.
+For the record `{ name: "Kris", skiLengths: [172, 174, 181] }`, the chained forms do
+not match, while the two-condition form does (181 witnesses the first condition, 172
+the second).
+
+**Scoped sub-queries** generalize this to object elements: a property path directly
+followed by a bracketed group scopes the whole group to one element, with inner paths
+relative to that element:
+
+```
+skis[length=ge=175&width=le=80]   ; some ski is both long and narrow
+```
+
+Canonically both forms are an *element-scoped match* (§6): the path plus a group whose
+conditions have element-relative paths (an empty relative path denotes the element
+value itself, as chained scalar comparisons produce). For a single-valued property,
+element scoping is trivially equivalent to separate conditions; parsers cannot know
+value cardinality, so the scoping structure is always preserved. (Or-chaining is
+logically distributable over the existential quantifier, but it is represented scoped
+as well, for symmetry.)
+
+Executors are encouraged to execute same-element `ge`/`gt` + `le`/`lt` pairs as a
+single index range scan — for element-indexed lists that scan implements same-element
+semantics naturally.
 
 ### 5.4 Logical composition and grouping
 
@@ -248,7 +279,8 @@ Dot syntax addresses nested properties: `brand.name=Microsoft`. Where the data m
 declares relationships, path traversal crosses them; filtering through a relationship
 has inner-join semantics, while projecting an unfiltered relationship via `select` has
 left-join semantics. When a path traverses a list-valued property, a condition matches
-if **any** element matches (existential semantics).
+if **any** element matches (existential semantics); to bind several comparisons to the
+same element, use element scoping (§5.3).
 
 Literal dots in property names are expressed with `%2E` (§4.2).
 
@@ -300,12 +332,18 @@ Query      := { filter?:  Group,
                 offset?:  non-negative integer }
 
 Group      := { operator: "and" | "or",
-                terms:    [ (Condition | Group) … ] }
+                terms:    [ (Condition | Group | ElementMatch) … ] }
 
 Condition  := { path:       [ segment … ],       // one or more segments
                 comparator: name,                // canonical, never an alias
                 negated?:   boolean,
                 value:      Value }
+
+ElementMatch := { path:     [ segment … ],       // §5.3: ∃ value at path
+                  negated?: boolean,             //        satisfying `some`
+                  some:     Group }              // inner Condition paths are
+                                                 // element-relative; [] = the
+                                                 // element value itself
 
 SortKey    := { path: [ segment … ], direction: "asc" | "desc" }
 
@@ -319,9 +357,10 @@ Value      := string | number | boolean | null | timestamp | [ Value … ]
 Invariants:
 
 - **All sugar is gone.** Aliases are resolved to canonical comparator names; `!=`
-  desugars to `negated eq`; wildcards to `starts_with`; chaining and `between` to plain
-  conditions in a group. Two surface queries with the same meaning parse to the same
-  representation.
+  desugars to `negated eq`; wildcards to `starts_with`; chaining and `between` to an
+  ElementMatch; `prop[x=1]` with a single inner condition normalizes to the plain
+  Condition `prop.x=1` (an ElementMatch always scopes two or more comparisons). Two
+  surface queries with the same meaning parse to the same representation.
 - **A condition's `path` is always a segment list**, even for a single segment.
 - `filter` is absent for an unfiltered query; a query with a single condition is an
   `and` group with one term (there is no bare-condition special case).
@@ -346,6 +385,8 @@ Every Query has a canonical string form, defined so that `parse(serialize(q)) = 
 - explicit `type:` prefixes whenever the interpreted reading of the emitted token would
   differ from the value's type;
 - `[...]` for all grouping; `%2E` for literal dots in segments;
+- element-scoped matches in chained form (`prop=ge=1&=le=5`) when every inner path is
+  empty, and in scoped-sub-query form (`prop[…]`) otherwise;
 - call functions last, in the order `select`, `sort`, `limit`.
 
 TODO: full normalization rules (value-token escaping table, timestamp formatting,
@@ -400,7 +441,7 @@ or in canonical serialization:
 |---|---|
 | `ne` | `not_` `eq` (interpreted value) |
 | `not_equal`, `equals` | `not_` `eq` / `eq` (verbatim value) |
-| `between=(lo,hi)` | `ge=lo` AND `le=hi` on the same path (inclusive) |
+| `between=(lo,hi)` | element-scoped `ge=lo` AND `le=hi` (≡ `=ge=lo&=le=hi`, inclusive; same-element per §5.3) |
 | `not_between=(lo,hi)` | negation of the above |
 | `sw`, `ew`, `ct`, `includes` | `starts_with`, `ends_with`, `contains`, `contains` |
 | `less_than`, `greater_than`, `lessThan`, `greaterThan`, … | `lt`, `gt`, … |
@@ -421,7 +462,7 @@ Tracked so the spec stays ideal while implementations converge. As of harper `ma
 | # | Divergence | Spec position |
 |---|---|---|
 | 1 | Simple queries (no structural characters) skip parsing and surface as raw name/value pairs; consumers handle two condition shapes | §6: one canonical shape; lazy representations are a host affordance outside the model |
-| 2 | `&=`/`|=` chains attach to the prior condition as `chainedConditions` | §5.3: chaining desugars to plain same-path conditions in a group |
+| 2 | `&=`/`|=` chains attach to the prior condition as `chainedConditions` | semantically correct (same-element scoping, §5.3); divergence is representational only — canonical form is ElementMatch. The bare `=op=` and-continuation spelling (new in 2.0) is not yet accepted |
 | 3 | Strict vs. converting comparison is modeled as distinct comparators (`equals`/`not_equal` vs `eq`/`ne`) | §5.2: one `eq`; verbatim vs. interpreted is a property of the value literal |
 | 4 | `between` is a first-class comparator | Appendix B alias, desugars to `ge`+`le` |
 | 5 | Sort is a linked list; select is a polymorphic array with marker properties (`asArray`, `name`) | §6: sort is an ordered list of SortKeys; projection is mode + fields |
