@@ -9,7 +9,7 @@
 import type { Case } from './corpus.ts';
 import { EXECUTION_LEVEL_LEDGER_ROWS, REQUIRED_FEATURES, featureCoverage, ledgerCoverage } from './corpus.ts';
 import type { Difference, Json, Outcome } from './canonical.ts';
-import { stableStringify } from './canonical.ts';
+import { digest, stableStringify } from './canonical.ts';
 import type { Classification, Comparison } from './classify.ts';
 import type { Ledger, Provenance, RunResult } from './compare.ts';
 
@@ -304,12 +304,16 @@ export function renderReport(run: RunResult): string {
 	write('rejects — including row 9, where a reserved call name is rejected *and* still falls');
 	write('through into `sort`.');
 	write();
-	write('| Query | Reference (deferred) | Harper (deferred) | Harper still produced |');
-	write('|---|---|---|---|');
+	write('The `#` column fingerprints the full produced value, so a change past the truncation');
+	write('point still changes the committed bytes and `conformance:check` still catches it.');
+	write();
+	write('| Query | Reference (deferred) | Harper (deferred) | Harper still produced | # |');
+	write('|---|---|---|---|---|');
 	for (const observation of run.deferred) {
 		const produced = canonicalOf(observation.harper);
 		write(
-			`| ${queryCell(observation.case.query)} | ${describeOutcome(observation.ref)} | ${describeOutcome(observation.harper)} | ${produced === undefined ? '—' : code(truncate(stableStringify(produced), 90))} |`
+			`| ${queryCell(observation.case.query)} | ${describeOutcome(observation.ref)} | ${describeOutcome(observation.harper)} | ` +
+				`${produced === undefined ? '—' : code(truncate(stableStringify(produced), 90))} | ${produced === undefined ? '—' : code(digest(produced))} |`
 		);
 	}
 	write();

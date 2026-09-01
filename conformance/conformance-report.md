@@ -2115,61 +2115,64 @@ permits this). These cases show what that path produces where the throwing entry
 rejects — including row 9, where a reserved call name is rejected *and* still falls
 through into `sort`.
 
-| Query | Reference (deferred) | Harper (deferred) | Harper still produced |
-|---|---|---|---|
-| `name==*Jo` | rejected | rejected (deferred) | `{}` |
-| `a=eq=unknown:x` | rejected | rejected (deferred) | `{}` |
-| `a=1&b=2\|c=3` | rejected (deferred) | rejected (deferred) | `{"filter":{"kind":"group","operator":"and","terms":[{"comparator":"eq","kind":"condition"…` |
-| `(a=1&b=2\|c=3)` | rejected (deferred) | rejected (deferred) | `{"filter":{"kind":"group","operator":"and","terms":[{"kind":"group","operator":"and","ter…` |
-| `(a=in=(1,2)&b=2)` | rejected (deferred) | rejected (deferred) | `{"filter":{"kind":"group","operator":"and","terms":[{"kind":"group","operator":"and","ter…` |
-| `ratings=ge=3&=le=4&=ne=5` | parsed | rejected (deferred) | `{"filter":{"kind":"group","operator":"and","terms":[{"kind":"elementMatch","path":["ratin…` |
-| `ratings=ge=3&=le=4\|=gt=1` | rejected (deferred) | rejected (deferred) | `{"filter":{"kind":"group","operator":"and","terms":[{"kind":"elementMatch","path":["ratin…` |
-| `&=le=4` | rejected (deferred) | rejected (deferred) | `{}` |
-| `(a=1)&=le=4` | rejected (deferred) | rejected (deferred) | `{"filter":{"kind":"group","operator":"and","terms":[{"kind":"group","operator":"and","ter…` |
-| `scores[=ge=10\|=le=2]` | parsed | rejected (deferred) | `{}` |
-| `scores[=ge=10&=le=20]` | parsed | rejected (deferred) | `{}` |
-| `scores[=ge=10]` | parsed | rejected (deferred) | `{"filter":{"kind":"group","operator":"and","terms":[{"kind":"elementMatch","path":["score…` |
-| `tags[=not_eq=urgent]` | parsed | rejected (deferred) | `{"filter":{"kind":"group","operator":"and","terms":[{"kind":"elementMatch","path":["tags"…` |
-| `reviews[=ge=4&author.name=kim]` | parsed | rejected (deferred) | `{}` |
-| `not(a=1)` | parsed | rejected (deferred) | `{}` |
-| `not(a=1&b=2)` | parsed | rejected (deferred) | `{}` |
-| `not(a=1\|b=2)` | parsed | rejected (deferred) | `{}` |
-| `not(not(a=1))` | parsed | rejected (deferred) | `{}` |
-| `status=open&not(tag=urgent\|tag=blocked)` | parsed | rejected (deferred) | `{"filter":{"kind":"group","operator":"and","terms":[{"comparator":"eq","kind":"condition"…` |
-| `not(scores[=ge=10&=le=20])` | parsed | rejected (deferred) | `{}` |
-| `not(reviews[rating=ge=4])` | parsed | rejected (deferred) | `{}` |
-| `a=1&not(b=2)` | parsed | rejected (deferred) | `{"filter":{"kind":"group","operator":"and","terms":[{"comparator":"eq","kind":"condition"…` |
-| `[not(a=1)\|b=2]` | parsed | rejected (deferred) | `{"filter":{"kind":"group","operator":"and","terms":[{"kind":"group","operator":"and","ter…` |
-| `not()` | rejected (deferred) | rejected (deferred) | `{}` |
-| `not(a=1&b=2\|c=3)` | rejected (deferred) | rejected (deferred) | `{}` |
-| `sort()` | parsed | rejected (deferred) | `{}` |
-| `sort(a` | rejected (deferred) | rejected (deferred) | `{}` |
-| `select(a` | rejected (deferred) | rejected (deferred) | `{"select":{"fields":[],"mode":"records"}}` |
-| `select([a,b)` | rejected (deferred) | rejected (deferred) | `{"select":{"fields":[{"path":["a"]}],"mode":"tuples"}}` |
-| `limit()` | rejected (deferred) | rejected (deferred) | `{}` |
-| `limit(1,2,3)` | rejected (deferred) | rejected (deferred) | `{}` |
-| `limit(5,10` | rejected (deferred) | rejected (deferred) | `{"limit":5}` |
-| `unknown(1)` | rejected (deferred) | rejected (deferred) | `{}` |
-| `lt(price,10)` | rejected (deferred) | rejected (deferred) | `{}` |
-| `group-by(a)` | rejected (deferred) | rejected (deferred) | `{"sort":[{"direction":"asc","path":["a"]}]}` |
-| `count(a)` | rejected (deferred) | rejected (deferred) | `{}` |
-| `distinct(a)` | rejected (deferred) | rejected (deferred) | `{}` |
-| `aggregate(a)` | rejected (deferred) | rejected (deferred) | `{}` |
-| `(` | rejected (deferred) | rejected (deferred) | `{"filter":{"kind":"group","operator":"and","terms":[{"kind":"group","operator":"and","ter…` |
-| `)` | rejected (deferred) | rejected (deferred) | `{}` |
-| `[` | rejected (deferred) | rejected (deferred) | `{"filter":{"kind":"group","operator":"and","terms":[{"kind":"group","operator":"and","ter…` |
-| `]` | rejected (deferred) | rejected (deferred) | `{}` |
-| `(a=1))` | rejected (deferred) | rejected (deferred) | `{"filter":{"kind":"group","operator":"and","terms":[{"kind":"group","operator":"and","ter…` |
-| `(a=1]` | rejected (deferred) | rejected (deferred) | `{"filter":{"kind":"group","operator":"and","terms":[{"kind":"group","operator":"and","ter…` |
-| `\|` | parsed | rejected (deferred) | `{}` |
-| `\|a=1` | parsed | rejected (deferred) | `{"filter":{"kind":"group","operator":"and","terms":[{"comparator":"eq","kind":"condition"…` |
-| `==1` | rejected (deferred) | rejected (deferred) | `{}` |
-| `a=1=2` | rejected (deferred) | rejected (deferred) | `{"filter":{"kind":"group","operator":"and","terms":[{"comparator":"eq","kind":"condition"…` |
-| `a=9lives=1` | rejected (deferred) | rejected (deferred) | `{"filter":{"kind":"group","operator":"and","terms":[{"comparator":"eq","kind":"condition"…` |
-| `a<>1` | rejected (deferred) | rejected (deferred) | `{}` |
-| `a]b=1` | rejected (deferred) | rejected (deferred) | `{"filter":{"kind":"group","operator":"and","terms":[{"comparator":"eq","kind":"condition"…` |
-| `a==%ZZ` | rejected | rejected (deferred) | `{}` |
-| `a==%E0%A4%A` | rejected | rejected (deferred) | `{}` |
+The `#` column fingerprints the full produced value, so a change past the truncation
+point still changes the committed bytes and `conformance:check` still catches it.
+
+| Query | Reference (deferred) | Harper (deferred) | Harper still produced | # |
+|---|---|---|---|---|
+| `name==*Jo` | rejected | rejected (deferred) | `{}` | `5465b825` |
+| `a=eq=unknown:x` | rejected | rejected (deferred) | `{}` | `5465b825` |
+| `a=1&b=2\|c=3` | rejected (deferred) | rejected (deferred) | `{"filter":{"kind":"group","operator":"and","terms":[{"comparator":"eq","kind":"condition"…` | `37295f93` |
+| `(a=1&b=2\|c=3)` | rejected (deferred) | rejected (deferred) | `{"filter":{"kind":"group","operator":"and","terms":[{"kind":"group","operator":"and","ter…` | `f8343272` |
+| `(a=in=(1,2)&b=2)` | rejected (deferred) | rejected (deferred) | `{"filter":{"kind":"group","operator":"and","terms":[{"kind":"group","operator":"and","ter…` | `95b3c221` |
+| `ratings=ge=3&=le=4&=ne=5` | parsed | rejected (deferred) | `{"filter":{"kind":"group","operator":"and","terms":[{"kind":"elementMatch","path":["ratin…` | `76fec92f` |
+| `ratings=ge=3&=le=4\|=gt=1` | rejected (deferred) | rejected (deferred) | `{"filter":{"kind":"group","operator":"and","terms":[{"kind":"elementMatch","path":["ratin…` | `1b82c9a2` |
+| `&=le=4` | rejected (deferred) | rejected (deferred) | `{}` | `5465b825` |
+| `(a=1)&=le=4` | rejected (deferred) | rejected (deferred) | `{"filter":{"kind":"group","operator":"and","terms":[{"kind":"group","operator":"and","ter…` | `3b8207e8` |
+| `scores[=ge=10\|=le=2]` | parsed | rejected (deferred) | `{}` | `5465b825` |
+| `scores[=ge=10&=le=20]` | parsed | rejected (deferred) | `{}` | `5465b825` |
+| `scores[=ge=10]` | parsed | rejected (deferred) | `{"filter":{"kind":"group","operator":"and","terms":[{"kind":"elementMatch","path":["score…` | `fa3b3b48` |
+| `tags[=not_eq=urgent]` | parsed | rejected (deferred) | `{"filter":{"kind":"group","operator":"and","terms":[{"kind":"elementMatch","path":["tags"…` | `25885a2a` |
+| `reviews[=ge=4&author.name=kim]` | parsed | rejected (deferred) | `{}` | `5465b825` |
+| `not(a=1)` | parsed | rejected (deferred) | `{}` | `5465b825` |
+| `not(a=1&b=2)` | parsed | rejected (deferred) | `{}` | `5465b825` |
+| `not(a=1\|b=2)` | parsed | rejected (deferred) | `{}` | `5465b825` |
+| `not(not(a=1))` | parsed | rejected (deferred) | `{}` | `5465b825` |
+| `status=open&not(tag=urgent\|tag=blocked)` | parsed | rejected (deferred) | `{"filter":{"kind":"group","operator":"and","terms":[{"comparator":"eq","kind":"condition"…` | `e2ec90d5` |
+| `not(scores[=ge=10&=le=20])` | parsed | rejected (deferred) | `{}` | `5465b825` |
+| `not(reviews[rating=ge=4])` | parsed | rejected (deferred) | `{}` | `5465b825` |
+| `a=1&not(b=2)` | parsed | rejected (deferred) | `{"filter":{"kind":"group","operator":"and","terms":[{"comparator":"eq","kind":"condition"…` | `1bf545d5` |
+| `[not(a=1)\|b=2]` | parsed | rejected (deferred) | `{"filter":{"kind":"group","operator":"and","terms":[{"kind":"group","operator":"and","ter…` | `6f4af572` |
+| `not()` | rejected (deferred) | rejected (deferred) | `{}` | `5465b825` |
+| `not(a=1&b=2\|c=3)` | rejected (deferred) | rejected (deferred) | `{}` | `5465b825` |
+| `sort()` | parsed | rejected (deferred) | `{}` | `5465b825` |
+| `sort(a` | rejected (deferred) | rejected (deferred) | `{}` | `5465b825` |
+| `select(a` | rejected (deferred) | rejected (deferred) | `{"select":{"fields":[],"mode":"records"}}` | `664b0b67` |
+| `select([a,b)` | rejected (deferred) | rejected (deferred) | `{"select":{"fields":[{"path":["a"]}],"mode":"tuples"}}` | `47fe95e8` |
+| `limit()` | rejected (deferred) | rejected (deferred) | `{}` | `5465b825` |
+| `limit(1,2,3)` | rejected (deferred) | rejected (deferred) | `{}` | `5465b825` |
+| `limit(5,10` | rejected (deferred) | rejected (deferred) | `{"limit":5}` | `d4bcd7fd` |
+| `unknown(1)` | rejected (deferred) | rejected (deferred) | `{}` | `5465b825` |
+| `lt(price,10)` | rejected (deferred) | rejected (deferred) | `{}` | `5465b825` |
+| `group-by(a)` | rejected (deferred) | rejected (deferred) | `{"sort":[{"direction":"asc","path":["a"]}]}` | `88bc04e3` |
+| `count(a)` | rejected (deferred) | rejected (deferred) | `{}` | `5465b825` |
+| `distinct(a)` | rejected (deferred) | rejected (deferred) | `{}` | `5465b825` |
+| `aggregate(a)` | rejected (deferred) | rejected (deferred) | `{}` | `5465b825` |
+| `(` | rejected (deferred) | rejected (deferred) | `{"filter":{"kind":"group","operator":"and","terms":[{"kind":"group","operator":"and","ter…` | `c82b0991` |
+| `)` | rejected (deferred) | rejected (deferred) | `{}` | `5465b825` |
+| `[` | rejected (deferred) | rejected (deferred) | `{"filter":{"kind":"group","operator":"and","terms":[{"kind":"group","operator":"and","ter…` | `c82b0991` |
+| `]` | rejected (deferred) | rejected (deferred) | `{}` | `5465b825` |
+| `(a=1))` | rejected (deferred) | rejected (deferred) | `{"filter":{"kind":"group","operator":"and","terms":[{"kind":"group","operator":"and","ter…` | `3b8207e8` |
+| `(a=1]` | rejected (deferred) | rejected (deferred) | `{"filter":{"kind":"group","operator":"and","terms":[{"kind":"group","operator":"and","ter…` | `c82b0991` |
+| `\|` | parsed | rejected (deferred) | `{}` | `5465b825` |
+| `\|a=1` | parsed | rejected (deferred) | `{"filter":{"kind":"group","operator":"and","terms":[{"comparator":"eq","kind":"condition"…` | `1bf545d5` |
+| `==1` | rejected (deferred) | rejected (deferred) | `{}` | `5465b825` |
+| `a=1=2` | rejected (deferred) | rejected (deferred) | `{"filter":{"kind":"group","operator":"and","terms":[{"comparator":"eq","kind":"condition"…` | `1146774a` |
+| `a=9lives=1` | rejected (deferred) | rejected (deferred) | `{"filter":{"kind":"group","operator":"and","terms":[{"comparator":"eq","kind":"condition"…` | `1bf545d5` |
+| `a<>1` | rejected (deferred) | rejected (deferred) | `{}` | `5465b825` |
+| `a]b=1` | rejected (deferred) | rejected (deferred) | `{"filter":{"kind":"group","operator":"and","terms":[{"comparator":"eq","kind":"condition"…` | `8c4b0bb0` |
+| `a==%ZZ` | rejected | rejected (deferred) | `{}` | `5465b825` |
+| `a==%E0%A4%A` | rejected | rejected (deferred) | `{}` | `5465b825` |
 
 ## Every case
 

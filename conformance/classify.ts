@@ -145,7 +145,7 @@ const RULES: readonly Rule[] = [
 	},
 	{
 		id: 'ledger-13-no-not-expression',
-		when: (comparison) => hasFeature(comparison, 'not-expr') && !bothParsed(comparison),
+		when: (comparison) => hasFeature(comparison, 'not-expr') && harperRejectsOnly(comparison),
 		classify: () => ({
 			verdict: 'ledger',
 			row: 13,
@@ -175,7 +175,9 @@ const RULES: readonly Rule[] = [
 	},
 	{
 		id: 'ledger-6-lenient-value-scan',
-		when: (comparison) => hasLedgerTag(comparison, 6),
+		// The tag alone would swallow any other disagreement on these queries, so the rule also
+		// requires the shape the tolerance actually produces: Harper accepts, the reference does not.
+		when: (comparison) => hasLedgerTag(comparison, 6) && refRejectsOnly(comparison),
 		classify: () => ({
 			verdict: 'ledger',
 			row: 6,
@@ -185,7 +187,7 @@ const RULES: readonly Rule[] = [
 	},
 	{
 		id: 'ledger-7-repeated-array-parameter',
-		when: (comparison) => hasLedgerTag(comparison, 7),
+		when: (comparison) => hasLedgerTag(comparison, 7) && refRejectsOnly(comparison),
 		classify: () => ({
 			verdict: 'ledger',
 			row: 7,
@@ -551,9 +553,23 @@ const VALUE_MODE_CLASSIFICATION: Extract<Classification, { verdict: 'new' }> = {
 	},
 };
 
+/**
+ * Outcomes that can constitute agreement. A timeout, an adapter gap or a harness error is
+ * never agreement, even when both sides report it — those mean the harness did not observe
+ * the parse, which has to surface rather than pass.
+ */
+const AGREEABLE_STATUSES: ReadonlySet<string> = new Set(['parsed', 'rejected', 'deferred-error']);
+
 export function classify(comparison: Comparison): Classification {
-	if (isRejection(comparison.ref) && isRejection(comparison.harper)) return { verdict: 'agrees' };
-	if (comparison.ref.status === comparison.harper.status && comparison.differences.length === 0 && !comparison.alsoUninterpretedValues)
+	// Note that agreement requires the same *mode* of rejection, not merely that neither side
+	// accepted: a `rejected` on one side and a `deferred-error` on the other is a real
+	// difference (the deferring side still produced a partial result) and must reach the rules.
+	if (
+		comparison.ref.status === comparison.harper.status &&
+		AGREEABLE_STATUSES.has(comparison.ref.status) &&
+		comparison.differences.length === 0 &&
+		!comparison.alsoUninterpretedValues
+	)
 		return { verdict: 'agrees' };
 
 	for (const rule of RULES) {

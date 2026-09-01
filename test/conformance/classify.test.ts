@@ -61,12 +61,42 @@ describe('classify', () => {
 		assert.deepEqual(classify(comparison({})), { verdict: 'agrees' });
 	});
 
-	it('calls a shared rejection agreement, however each side signalled it', () => {
+	it('calls a shared rejection agreement', () => {
 		assert.deepEqual(classify(comparison({ ref: rejected, harper: rejected })), { verdict: 'agrees' });
-		assert.deepEqual(
-			classify(comparison({ ref: rejected, harper: { status: 'deferred-error', error: 'nope', canonical: {} } })),
-			{ verdict: 'agrees' }
+	});
+
+	it('does NOT call a throw and a deferred error agreement — the deferring side kept a partial', () => {
+		const verdict = classify(
+			comparison({
+				case: { ...CASE, query: 'not=a=witness', features: [] },
+				ref: rejected,
+				harper: { status: 'deferred-error', error: 'nope', canonical: { limit: 1 } },
+			})
 		);
+		assert.deepEqual(verdict, { verdict: 'unclassified' });
+	});
+
+	it('never calls an unobserved parse agreement, on either side', () => {
+		const timeout: Outcome = { status: 'timeout', ms: 5000 };
+		assert.deepEqual(classify(comparison({ case: { ...CASE, query: 'x=1', features: [] }, ref: timeout, harper: timeout })), {
+			verdict: 'unclassified',
+		});
+		const gap: Outcome = { status: 'adapter-gap', error: 'unknown shape' };
+		assert.deepEqual(classify(comparison({ case: { ...CASE, query: 'y=1', features: [] }, ref: gap, harper: gap })), {
+			verdict: 'unclassified',
+		});
+	});
+
+	it('does not attribute an unrelated disagreement to a ledger tag the case happens to carry', () => {
+		// `ledger-6-lenient-value-scan` fires only on the shape the tolerance produces
+		// (Harper accepts, the reference does not) — not on any difference at all.
+		const verdict = classify(
+			comparison({
+				case: { ...CASE, query: 'foo=ba)r', features: ['tolerance'], ledger: [6] },
+				differences: [{ at: '/filter/terms/0/path/0', kind: 'value', ref: 'foo', harper: 'bar' }],
+			})
+		);
+		assert.deepEqual(verdict, { verdict: 'unclassified' });
 	});
 
 	it('classifies a case whose only difference was the value mode', () => {
