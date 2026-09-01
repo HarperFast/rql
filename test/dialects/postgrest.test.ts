@@ -158,6 +158,21 @@ const vectors: { name: string; search: string; expected: ParseResult }[] = [
 		expected: grouped('or', cond(['a'], 'eq', 1), group('or', cond(['b'], 'eq', 2, true), cond(['c'], 'eq', 3, true))),
 	},
 	{
+		name: 'E.2 not.eq remains a negated operator inside a logic leaf',
+		search: 'or=(a.not.eq.1,b.eq.2)',
+		expected: grouped('or', cond(['a'], 'eq', 1, true), cond(['b'], 'eq', 2)),
+	},
+	{
+		name: 'E.2 not.in remains a negated operator inside a logic leaf',
+		search: 'or=(a.not.in.(1,2),b.eq.2)',
+		expected: grouped('or', cond(['a'], 'in', [1, 2], true), cond(['b'], 'eq', 2)),
+	},
+	{
+		name: 'E.2 leaf negation composes with a negated logic tree',
+		search: 'not.or=(a.not.eq.1,b.eq.2)',
+		expected: grouped('and', cond(['a'], 'eq', 1), cond(['b'], 'eq', 2, true)),
+	},
+	{
 		name: 'E.2 gt(any) becomes an or Group over values', search: 'age=gt(any).{11,21}',
 		expected: grouped('or', cond(['age'], 'gt', 11), cond(['age'], 'gt', 21)),
 	},
@@ -196,6 +211,10 @@ const vectors: { name: string; search: string; expected: ParseResult }[] = [
 	{
 		name: 'E.2 ov array overlap becomes canonical in', search: 'tags=ov.{red,blue}',
 		expected: filtered(cond(['tags'], 'in', ['red', 'blue'])),
+	},
+	{
+		name: 'range-form ov remains an extension comparator over the range value', search: 'period=ov.[1,10)',
+		expected: filtered(cond(['period'], 'ov', '[1,10)')),
 	},
 	{
 		name: 'E.2 not.ov becomes negated canonical in', search: 'tags=not.ov.{red,blue}',
@@ -298,6 +317,14 @@ const vectors: { name: string; search: string; expected: ParseResult }[] = [
 		expected: { select: projection(['json_col', 'field']) },
 	},
 	{
+		name: 'PostgREST wildcard select maps to an absent canonical projection', search: 'select=*',
+		expected: {},
+	},
+	{
+		name: 'wildcard dominates an explicit PostgREST select list', search: 'select=id,*',
+		expected: {},
+	},
+	{
 		name: 'E.2 order defaults to ascending', search: 'order=name',
 		expected: { sort: [sort(['name'])] },
 	},
@@ -370,6 +397,20 @@ describe('PostgREST input and shared-model behavior', () => {
 		);
 	});
 
+	it('parses a leading quoted identifier inside a logic tree', () => {
+		assert.deepEqual(
+			parsePostgrest('or=(%22information.cpe%22.eq.x,b.eq.2)'),
+			grouped('or', cond(['information.cpe'], 'eq', 'x'), cond(['b'], 'eq', 2)),
+		);
+	});
+
+	it('preserves trailing whitespace in logic-leaf operands', () => {
+		assert.deepEqual(
+			parsePostgrest('or=(name.eq.Bob%20,id.eq.1)'),
+			grouped('or', cond(['name'], 'eq', 'Bob '), cond(['id'], 'eq', 1)),
+		);
+	});
+
 	it('allows an unquoted operand to end in a quote character', () => {
 		assert.deepEqual(
 			parsePostgrest('title=eq.The+%22Best%22'),
@@ -429,6 +470,13 @@ describe('Unsupported PostgREST features', () => {
 	it('drop cannot erase the entire projection', () => {
 		assert.throws(
 			() => parsePostgrest('select=display:name', { onUnsupported: 'drop' }),
+			UnsupportedFeature,
+		);
+	});
+
+	it('drop does not discard resource embedding because embedded-filter semantics differ', () => {
+		assert.throws(
+			() => parsePostgrest('select=title,actors(*)&actors.first_name=eq.Jehanne', { onUnsupported: 'drop' }),
 			UnsupportedFeature,
 		);
 	});

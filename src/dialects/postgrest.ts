@@ -252,7 +252,9 @@ function parseFilterValue(path: string[], expression: string, budget: ParseBudge
 	} else if (parsed.operator === 'in') {
 		term = condition(path, comparator, parseList(parsed.operand, '('), false, budget);
 	} else if (parsed.operator === 'ov') {
-		term = condition(path, comparator, parseList(parsed.operand, '{'), false, budget);
+		term = parsed.operand.startsWith('{')
+			? condition(path, comparator, parseList(parsed.operand, '{'), false, budget)
+			: condition(path, 'ov', parseOperand(parsed.operand), false, budget);
 	} else if (parsed.operator === 'cs') {
 		const values = parseList(parsed.operand, '{');
 		term = {
@@ -292,9 +294,10 @@ function unwrapLogicBody(raw: string): string {
 
 function parseLogicLeaf(raw: string, budget: ParseBudget): Term {
 	const candidateIndexes: number[] = [];
+	const stack: string[] = [];
 	let quoted = false;
 	let escaped = false;
-	for (let index = 1; index < raw.length; index++) {
+	for (let index = 0; index < raw.length; index++) {
 		const character = raw[index];
 		if (quoted) {
 			if (escaped) escaped = false;
@@ -302,22 +305,38 @@ function parseLogicLeaf(raw: string, budget: ParseBudget): Term {
 			else if (character === '"') quoted = false;
 			continue;
 		}
-		if (character === '"') quoted = true;
-		else if (character === '.') candidateIndexes.push(index);
+		if (character === '"') {
+			quoted = true;
+		} else if (character === '(' || character === '[' || character === '{') {
+			stack.push(character);
+		} else if (character === ')' || character === ']' || character === '}') {
+			const open = stack.pop();
+			if (!open || !matchingClose(open, character)) syntaxViolation('unbalanced operand delimiter');
+		} else if (character === '.' && index > 0 && stack.length === 0) {
+			candidateIndexes.push(index);
+		}
 	}
 	if (quoted) syntaxViolation('unterminated quoted column path');
+	if (stack.length > 0) syntaxViolation('unbalanced operand delimiter');
 	for (let candidate = candidateIndexes.length - 1; candidate >= 0; candidate--) {
 		const index = candidateIndexes[candidate];
 		const expression = raw.slice(index + 1);
 		const operatorMatch = LOGIC_OPERATOR_PATTERN.exec(expression);
-		if (operatorMatch && OPERATOR_NAMES.has(operatorMatch[1]))
+		if (operatorMatch && OPERATOR_NAMES.has(operatorMatch[1])) {
+			const previousIndex = candidate > 0 ? candidateIndexes[candidate - 1] : -1;
+			if (raw.slice(previousIndex + 1, index) === 'not') {
+				return parseFilterValue(
+					splitColumnPath(raw.slice(0, previousIndex)), raw.slice(previousIndex + 1), budget,
+				);
+			}
 			return parseFilterValue(splitColumnPath(raw.slice(0, index)), expression, budget);
+		}
 	}
 	syntaxViolation('logic leaf must have the form column.[not.]operator.operand');
 }
 
 function parseLogicTerm(raw: string, depth: number, budget: ParseBudget): Term {
-	const value = raw.trim();
+	const value = raw;
 	const call = LOGIC_CALL_PATTERN.exec(value);
 	if (!call) return parseLogicLeaf(value, budget);
 	if (!value.endsWith(')')) syntaxViolation('unbalanced logic group');
@@ -344,23 +363,27 @@ function unsupported(feature: string, options: PostgrestOptions | undefined): bo
 
 function parseSelect(
 	raw: string, options: PostgrestOptions | undefined, budget: ParseBudget,
-): Projection {
+): Projection | undefined {
 	const fields: Field[] = [];
 	let dropped = false;
+	let wildcard = false;
 	for (const rawField of splitTopLevel(raw)) {
 		const field = rawField.trim();
 		if (!field) syntaxViolation('select contains an empty field');
+		if (field === '*') { wildcard = true; continue; }
 		let feature: string | undefined;
 		if (includesUnquoted(field, '::')) feature = `projection cast '${field}'`;
 		else if (includesUnquoted(field, ':')) feature = `projection alias '${field}'`;
-		else if (includesUnquoted(field, '(') || includesUnquoted(field, ')') || includesUnquoted(field, '!'))
-			feature = `resource embedding '${field}'`;
+		else if (includesUnquoted(field, '(') || includesUnquoted(field, ')') || includesUnquoted(field, '!')) {
+			throw new UnsupportedFeature(`PostgREST feature 'resource embedding (${field})' is unsupported`);
+		}
 		if (feature) {
 			if (unsupported(feature, options)) { dropped = true; continue; }
 		}
 		useTerms(budget, 1);
 		fields.push({ path: splitColumnPath(field) });
 	}
+	if (wildcard) return undefined;
 	if (fields.length === 0 && dropped)
 		throw new UnsupportedFeature('PostgREST cannot drop every selected field');
 	if (fields.length === 0) syntaxViolation('select cannot be empty');
@@ -414,7 +437,10 @@ function parseInto(
 		if (key === 'select' || key === 'order' || key === 'limit' || key === 'offset') {
 			if (seenReserved.has(key)) syntaxViolation(`duplicate '${key}' parameter`);
 			seenReserved.add(key);
-			if (key === 'select') result.select = parseSelect(value, options, budget);
+			if (key === 'select') {
+				const select = parseSelect(value, options, budget);
+				if (select) result.select = select;
+			}
 			else if (key === 'order') result.sort = parseOrder(value, options, budget);
 			else result[key] = parseNonNegativeInteger(value, key);
 		} else if (key === 'or' || key === 'and' || key === 'not.or' || key === 'not.and') {
