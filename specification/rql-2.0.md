@@ -587,3 +587,101 @@ to.
 Known ledgers:
 
 - **Harper** — [HarperFast/harper#2440](https://github.com/HarperFast/harper/issues/2440)
+
+## Appendix E — Hosting other dialects: PostgREST (non-normative)
+
+[PostgREST](https://docs.postgrest.org/) exposes a URL filter syntax over PostgreSQL
+that solves the same problem as RQL and arrives at a different surface. This appendix
+maps it onto the canonical model (§6). Nothing here is normative: it is included as
+evidence that the canonical representation is dialect-neutral, and as guidance for
+implementations that want to accept a second surface syntax — a conforming parser MAY
+offer additional surfaces so long as each desugars into the same model.
+
+### E.1 Why the surfaces do not converge
+
+PostgREST's syntax is a transcription of PostgreSQL's operator set into URL space; RQL's
+is a store-neutral language. The differences are foundational, not cosmetic:
+
+| | PostgREST | RQL 2.0 |
+|---|---|---|
+| Operator position | inside the value, dot-separated — `?age=gte.18` | operator position — `age=ge=18` |
+| Bare `?a=b` | invalid; an operator is required | valid, `eq` with a verbatim value (§3.2) |
+| Operator names | transcribe PostgreSQL (`gte`, `neq`, `cs`, `ov`, `wfts`) | store-neutral (`ge`, `not_eq`, `contains`, `in`) |
+| Logical composition | prefix trees — `?or=(a.eq.1,and(b.eq.2,c.eq.3))` | infix — `a=1|[b=2&c=3]` |
+| Type handling | schema/SQL-typed, tri-state `NULL` | schema-free literals (§5.2), set semantics |
+
+The dot is the decisive collision: PostgREST spends it on the operator separator, RQL on
+property paths (`brand.name=x`). Neither can adopt the other's spelling without losing
+its own.
+
+### E.2 Operator mapping
+
+| PostgREST | Canonical RQL form |
+|---|---|
+| `eq`, `gt`, `gte`, `lt`, `lte` | `eq`, `gt`, `ge`, `lt`, `le` |
+| `neq` | `eq` with `negated` |
+| `in.(a,b)` | `in` with a value list |
+| `not.<op>` | the `not_` prefix — i.e. the same `negated` flag (§5.1.1) |
+| `not.and=(…)`, `not.or=(…)` | `not(...)` (§5.4) — both designs negate operators *and* trees |
+| `or=(…)`, `and=(…)` | `Group` with `operator: "or"` / `"and"` |
+| `<op>(any).{a,b}` | an `or` group of one condition per value (`eq(any)` collapses to `in`) |
+| `<op>(all).{a,b}` | an `and` group of one condition per value |
+| `cs.{a,b}` (array contains all) | `and` group of existential `eq` conditions on the array path (§5.5) |
+| `ov.{a,b}` (array overlap) | `in` |
+| `cd.{a,b,c}` (array contained in) | `not(path[=not_in=(a,b,c)])` — ∀ as ¬∃¬ (§5.4) |
+| `is.null` | `eq` with a `null` value (see E.4 on tri-state differences) |
+| `like`, `ilike`, `match`, `imatch`, `fts`/`plfts`/`phfts`/`wfts` | not Core — Core is regex-free by design. Available as **extension comparators**: §5.1.2's open vocabulary lets a host accept these names and remain conformant. PostgREST's `*`-for-`%` alias parallels RQL's `==stem*` wildcard (§5.1.2) |
+| `sl`, `sr`, `nxl`, `nxr`, `adj` (range operators) | not Core; extension comparators over a range-typed value |
+| `isdistinct` | extension comparator (SQL `IS DISTINCT FROM`); see E.4 |
+| `select=col`, `order=col.desc`, `limit`/`offset` | `select(col)`, `sort(-col)`, `limit(start,end)` |
+| `json_col->>field` | a dotted path segment (`json_col.field`) |
+
+Every filter operator above either maps into the Core model or is expressible as an
+extension comparator, and both dialects' logical layers are the same `Group` tree in
+different notation.
+
+### E.3 Features RQL 2.0 lacks
+
+Honest gaps, recorded rather than mapped away:
+
+- **Projection aliasing and casting** — `select=alias:column`, `select=column::text`.
+  RQL's `Projection` has no rename or cast; a future revision could add an optional
+  `as`/`cast` to `Field`.
+- **Null ordering** — `order=age.nullsfirst`. `SortKey` (§6) has no nulls placement;
+  reserved for a future revision.
+- **Aggregates in projections** — `select=amount.sum()`; RQL keeps aggregation in the
+  Extensions profile (Appendix C).
+- **Resource embedding** — PostgREST's `select=…,other_table(…)` with `!inner`/`!left`
+  hints is richer than RQL's nested projection (§5.7), which fixes join semantics by
+  position (filtering a path is inner, projecting it is left; §5.5).
+- **Full-text search and range operators** — deliberately out of Core; extension
+  comparators only.
+
+### E.4 Semantic deltas to preserve deliberately
+
+- **Embedded-filter defaults.** In PostgREST, filtering an embedded resource narrows the
+  embedded rows and keeps the parent row (unless `!inner` is given). In RQL, a filter on
+  a relationship path is inner-join semantics on the parent. A dialect front-end MUST
+  therefore translate a PostgREST embedded filter into whichever RQL form matches the
+  caller's intent; the two defaults are not interchangeable.
+- **Null tri-state.** PostgREST inherits SQL's three-valued logic (`is.null`,
+  `is.unknown`, `isdistinct`). RQL comparators are set predicates over a schema-free
+  model: `path=not_eq=v` matches every record the un-negated condition does not
+  (§5.1.1), including records where the property is absent — which is *not* SQL's
+  `<> v`. Hosts backed by SQL should map RQL negation to `IS DISTINCT FROM`, not to
+  `<>`, to preserve RQL's semantics.
+- **Quantifier scope.** PostgREST's `any`/`all` modifiers quantify over the *value
+  list*; RQL's element scoping (§5.3) quantifies over the *property's elements*. Both
+  exist, and they are orthogonal — `path[=ge=1&=le=5]` has no PostgREST equivalent
+  short of a database view.
+
+### E.5 Practical use
+
+Two applications follow from the mapping:
+
+1. **A dialect front-end.** A parser can accept the PostgREST surface and emit the
+   canonical model, so one execution engine serves both syntaxes and the conformance
+   suite gains a second dialect's worth of vectors.
+2. **Client-ecosystem compatibility.** A host that accepts the PostgREST surface becomes
+   reachable by clients written against it. That is a product decision for the host, not
+   a requirement of this specification.
