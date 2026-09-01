@@ -7,6 +7,10 @@
 		".": {
 			"types": "./dist/index.d.ts",
 			"default": "./dist/index.js"
+		},
+		"./postgrest": {
+			"types": "./dist/dialects/postgrest.d.ts",
+			"default": "./dist/dialects/postgrest.js"
 		}
 	},
 	"files": [
@@ -15,7 +19,7 @@
 	],
 	"scripts": {
 		"build": "tsc",
-		"test": "node --experimental-strip-types --test test/v2/parse.test.ts",
+		"test": "node --experimental-strip-types --test test/v2/parse.test.ts test/dialects/postgrest.test.ts",
 		"typecheck": "tsc --noEmit"
 	},
 	"devDependencies": {
