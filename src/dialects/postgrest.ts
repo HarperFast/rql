@@ -1,10 +1,16 @@
 import { QueryError, SyntaxViolation } from '../errors.ts';
-import { interpretValue, negateGroup, negateTerm } from '../parser.ts';
+import { negateGroup, negateTerm } from '../parser.ts';
 import type {
 	Condition, ElementMatch, Field, Group, ParseOptions, ParseResult, Projection, SortKey, Value,
 } from '../types.ts';
 
 type Term = Condition | Group | ElementMatch;
+
+interface URLSearchParams {
+	entries(): IterableIterator<[string, string]>;
+}
+
+type URLSearchParamsConstructor = new (input?: string) => URLSearchParams;
 
 export interface PostgrestOptions extends ParseOptions {
 	onUnsupported?: 'throw' | 'drop';
@@ -23,6 +29,16 @@ const OPERATOR_NAMES = new Set([
 ]);
 
 const CONFIGURABLE_OPERATORS = new Set(['fts', 'plfts', 'phfts', 'wfts']);
+
+const FILTER_PATTERN = /^(not\.)?([a-z][a-z0-9_]*)(?:\(([^()]*)\))?\.([\s\S]*)$/;
+const LOGIC_OPERATOR_PATTERN = /^(?:not\.)?([a-z][a-z0-9_]*)(?:\([^()]*\))?\./;
+const LOGIC_CALL_PATTERN = /^(not\.)?(and|or)\(/;
+const NULL_ORDER_PATTERN = /(?:^|\.)(?:nullsfirst|nullslast)$/;
+const NON_NEGATIVE_INTEGER_PATTERN = /^(?:0|[1-9][0-9]*)$/;
+
+const URL_SEARCH_PARAMS = (globalThis as unknown as {
+	URLSearchParams: URLSearchParamsConstructor;
+}).URLSearchParams;
 
 type ParseBudget = { terms: number };
 
@@ -48,7 +64,7 @@ function matchingClose(open: string, close: string): boolean {
 	return close === ')' || close === ']';
 }
 
-function splitTopLevel(input: string): string[] {
+function splitTopLevel(input: string, maxParts = MAX_TERMS): string[] {
 	const parts: string[] = [];
 	const stack: string[] = [];
 	let quoted = false;
@@ -71,6 +87,7 @@ function splitTopLevel(input: string): string[] {
 			const open = stack.pop();
 			if (!open || !matchingClose(open, character)) syntaxViolation('unbalanced operand delimiter');
 		} else if (character === ',' && stack.length === 0) {
+			if (parts.length >= maxParts) syntaxViolation(`list exceeds the ${maxParts}-item limit`);
 			parts.push(input.slice(start, index));
 			start = index + 1;
 		}
@@ -78,8 +95,27 @@ function splitTopLevel(input: string): string[] {
 
 	if (quoted) syntaxViolation('unterminated quoted operand');
 	if (stack.length > 0) syntaxViolation('unbalanced operand delimiter');
+	if (parts.length >= maxParts) syntaxViolation(`list exceeds the ${maxParts}-item limit`);
 	parts.push(input.slice(start));
 	return parts;
+}
+
+function includesUnquoted(input: string, token: string): boolean {
+	let quoted = false;
+	let escaped = false;
+	for (let index = 0; index < input.length; index++) {
+		const character = input[index];
+		if (quoted) {
+			if (escaped) escaped = false;
+			else if (character === '\\') escaped = true;
+			else if (character === '"') quoted = false;
+		} else if (character === '"') {
+			quoted = true;
+		} else if (input.startsWith(token, index)) {
+			return true;
+		}
+	}
+	return false;
 }
 
 function decodeQuoted(raw: string): string {
@@ -92,6 +128,8 @@ function decodeQuoted(raw: string): string {
 			index++;
 			if (index >= raw.length - 1) syntaxViolation('malformed quoted operand escape');
 			value += raw[index];
+		} else if (character === '"') {
+			syntaxViolation('unescaped quote inside quoted operand');
 		} else {
 			value += character;
 		}
@@ -100,18 +138,16 @@ function decodeQuoted(raw: string): string {
 }
 
 function interpretDecodedValue(token: string): Value {
-	const colon = token.indexOf(':');
-	if (colon > 0) {
-		const type = token.slice(0, colon);
-		let encodedRest = encodeURIComponent(token.slice(colon + 1));
-		if (type === 'number' && encodedRest.startsWith('%24')) encodedRest = `$${encodedRest.slice(3)}`;
-		return interpretValue(`${type}:${encodedRest}`);
-	}
-	return interpretValue(encodeURIComponent(token));
+	if (token === 'null') return null;
+	if (token === 'true') return true;
+	if (token === 'false') return false;
+	const number = +token;
+	if (token !== '' && !isNaN(number) && String(number) === token) return number;
+	return token;
 }
 
 function parseOperand(raw: string): Value {
-	if (raw.startsWith('"') || raw.endsWith('"')) return decodeQuoted(raw);
+	if (raw.startsWith('"')) return decodeQuoted(raw);
 	return interpretDecodedValue(raw);
 }
 
@@ -121,7 +157,7 @@ function parseList(raw: string, open: '(' | '{'): Value[] {
 		syntaxViolation(`operator requires a ${open}${close} value list`);
 	const inner = raw.slice(1, -1);
 	if (inner === '') return [];
-	const parts = splitTopLevel(inner);
+	const parts = splitTopLevel(inner, MAX_LIST_VALUES);
 	if (parts.length > MAX_LIST_VALUES)
 		syntaxViolation(`value list exceeds the ${MAX_LIST_VALUES}-value limit`);
 	return parts.map(parseOperand);
@@ -135,10 +171,37 @@ function parseModifierValues(raw: string): Value[] {
 
 function splitColumnPath(raw: string): string[] {
 	if (!raw) syntaxViolation('column path is empty');
-	const segments = raw.split(/->>|->|\./).map((segment) => {
+	const segments: string[] = [];
+	let quoted = false;
+	let escaped = false;
+	let start = 0;
+	for (let index = 0; index < raw.length; index++) {
+		const character = raw[index];
+		if (quoted) {
+			if (escaped) escaped = false;
+			else if (character === '\\') escaped = true;
+			else if (character === '"') quoted = false;
+			continue;
+		}
+		if (character === '"') {
+			quoted = true;
+			continue;
+		}
+		let delimiterLength = 0;
+		if (character === '.') delimiterLength = 1;
+		else if (raw.startsWith('->>', index)) delimiterLength = 3;
+		else if (raw.startsWith('->', index)) delimiterLength = 2;
+		if (!delimiterLength) continue;
+		const segment = raw.slice(start, index);
 		if (!segment) syntaxViolation('column path contains an empty segment');
-		return segment.startsWith('"') || segment.endsWith('"') ? decodeQuoted(segment) : segment;
-	});
+		segments.push(segment.startsWith('"') ? decodeQuoted(segment) : segment);
+		index += delimiterLength - 1;
+		start = index + 1;
+	}
+	if (quoted) syntaxViolation('unterminated quoted column path');
+	const finalSegment = raw.slice(start);
+	if (!finalSegment) syntaxViolation('column path contains an empty segment');
+	segments.push(finalSegment.startsWith('"') ? decodeQuoted(finalSegment) : finalSegment);
 	return segments;
 }
 
@@ -152,7 +215,7 @@ function condition(
 }
 
 function parseOperator(expression: string): ParsedOperator {
-	const match = /^(not\.)?([a-z][a-z0-9_]*)(?:\(([^()]*)\))?\.([\s\S]*)$/.exec(expression);
+	const match = FILTER_PATTERN.exec(expression);
 	if (!match) syntaxViolation('filter must have the form [not.]operator.operand');
 	const [, notPrefix, operator, argument, operand] = match;
 	if (!OPERATOR_NAMES.has(operator)) syntaxViolation(`unknown PostgREST operator '${operator}'`);
@@ -228,10 +291,25 @@ function unwrapLogicBody(raw: string): string {
 }
 
 function parseLogicLeaf(raw: string, budget: ParseBudget): Term {
+	const candidateIndexes: number[] = [];
+	let quoted = false;
+	let escaped = false;
 	for (let index = 1; index < raw.length; index++) {
-		if (raw[index] !== '.') continue;
+		const character = raw[index];
+		if (quoted) {
+			if (escaped) escaped = false;
+			else if (character === '\\') escaped = true;
+			else if (character === '"') quoted = false;
+			continue;
+		}
+		if (character === '"') quoted = true;
+		else if (character === '.') candidateIndexes.push(index);
+	}
+	if (quoted) syntaxViolation('unterminated quoted column path');
+	for (let candidate = candidateIndexes.length - 1; candidate >= 0; candidate--) {
+		const index = candidateIndexes[candidate];
 		const expression = raw.slice(index + 1);
-		const operatorMatch = /^(?:not\.)?([a-z][a-z0-9_]*)(?:\([^()]*\))?\./.exec(expression);
+		const operatorMatch = LOGIC_OPERATOR_PATTERN.exec(expression);
 		if (operatorMatch && OPERATOR_NAMES.has(operatorMatch[1]))
 			return parseFilterValue(splitColumnPath(raw.slice(0, index)), expression, budget);
 	}
@@ -240,7 +318,7 @@ function parseLogicLeaf(raw: string, budget: ParseBudget): Term {
 
 function parseLogicTerm(raw: string, depth: number, budget: ParseBudget): Term {
 	const value = raw.trim();
-	const call = /^(not\.)?(and|or)\(/.exec(value);
+	const call = LOGIC_CALL_PATTERN.exec(value);
 	if (!call) return parseLogicLeaf(value, budget);
 	if (!value.endsWith(')')) syntaxViolation('unbalanced logic group');
 	const group = parseLogicGroup(
@@ -264,43 +342,56 @@ function unsupported(feature: string, options: PostgrestOptions | undefined): bo
 	throw new UnsupportedFeature(`PostgREST feature '${feature}' is unsupported`);
 }
 
-function parseSelect(raw: string, options: PostgrestOptions | undefined): Projection | undefined {
+function parseSelect(
+	raw: string, options: PostgrestOptions | undefined, budget: ParseBudget,
+): Projection {
 	const fields: Field[] = [];
+	let dropped = false;
 	for (const rawField of splitTopLevel(raw)) {
 		const field = rawField.trim();
 		if (!field) syntaxViolation('select contains an empty field');
 		let feature: string | undefined;
-		if (field.includes('::')) feature = `projection cast '${field}'`;
-		else if (field.includes(':')) feature = `projection alias '${field}'`;
-		else if (field.includes('(') || field.includes(')') || field.includes('!'))
+		if (includesUnquoted(field, '::')) feature = `projection cast '${field}'`;
+		else if (includesUnquoted(field, ':')) feature = `projection alias '${field}'`;
+		else if (includesUnquoted(field, '(') || includesUnquoted(field, ')') || includesUnquoted(field, '!'))
 			feature = `resource embedding '${field}'`;
 		if (feature) {
-			if (unsupported(feature, options)) continue;
+			if (unsupported(feature, options)) { dropped = true; continue; }
 		}
+		useTerms(budget, 1);
 		fields.push({ path: splitColumnPath(field) });
 	}
-	if (fields.length === 0) return undefined;
+	if (fields.length === 0 && dropped)
+		throw new UnsupportedFeature('PostgREST cannot drop every selected field');
+	if (fields.length === 0) syntaxViolation('select cannot be empty');
 	return { mode: 'records', fields };
 }
 
-function parseOrder(raw: string, options: PostgrestOptions | undefined): SortKey[] | undefined {
+function parseOrder(
+	raw: string, options: PostgrestOptions | undefined, budget: ParseBudget,
+): SortKey[] {
 	const keys: SortKey[] = [];
+	let dropped = false;
 	for (const rawKey of splitTopLevel(raw)) {
 		let key = rawKey.trim();
 		if (!key) syntaxViolation('order contains an empty key');
-		if (/(?:^|\.)(?:nullsfirst|nullslast)$/.test(key)) {
-			if (unsupported(`null ordering '${key}'`, options)) continue;
+		if (NULL_ORDER_PATTERN.test(key)) {
+			if (unsupported(`null ordering '${key}'`, options)) { dropped = true; continue; }
 		}
 		let direction: 'asc' | 'desc' = 'asc';
 		if (key.endsWith('.asc')) key = key.slice(0, -4);
 		else if (key.endsWith('.desc')) { key = key.slice(0, -5); direction = 'desc'; }
+		useTerms(budget, 1);
 		keys.push({ path: splitColumnPath(key), direction });
 	}
-	return keys.length > 0 ? keys : undefined;
+	if (keys.length === 0 && dropped)
+		throw new UnsupportedFeature('PostgREST cannot drop every order key');
+	if (keys.length === 0) syntaxViolation('order cannot be empty');
+	return keys;
 }
 
 function parseNonNegativeInteger(raw: string, name: string): number {
-	if (!/^(?:0|[1-9][0-9]*)$/.test(raw)) syntaxViolation(`${name} must be a non-negative integer`);
+	if (!NON_NEGATIVE_INTEGER_PATTERN.test(raw)) syntaxViolation(`${name} must be a non-negative integer`);
 	const value = Number(raw);
 	if (!Number.isSafeInteger(value)) syntaxViolation(`${name} exceeds the safe integer range`);
 	return value;
@@ -323,8 +414,8 @@ function parseInto(
 		if (key === 'select' || key === 'order' || key === 'limit' || key === 'offset') {
 			if (seenReserved.has(key)) syntaxViolation(`duplicate '${key}' parameter`);
 			seenReserved.add(key);
-			if (key === 'select') result.select = parseSelect(value, options);
-			else if (key === 'order') result.sort = parseOrder(value, options);
+			if (key === 'select') result.select = parseSelect(value, options, budget);
+			else if (key === 'order') result.sort = parseOrder(value, options, budget);
 			else result[key] = parseNonNegativeInteger(value, key);
 		} else if (key === 'or' || key === 'and' || key === 'not.or' || key === 'not.and') {
 			const operator = key.endsWith('or') ? 'or' : 'and';
@@ -340,8 +431,7 @@ function parseInto(
 }
 
 /**
- * Parse the Appendix E PostgREST surface into the RQL §6 canonical model.
- * `neq` intentionally uses RQL complement semantics, so absent properties differ from SQL `<>`.
+ * Appendix E.4: `neq` uses RQL complement semantics, so absent properties differ from SQL `<>`.
  */
 export function parsePostgrest(
 	search: string | URLSearchParams, options?: PostgrestOptions,
@@ -349,13 +439,13 @@ export function parsePostgrest(
 	const result: ParseResult = {};
 	try {
 		const parameters = typeof search === 'string'
-			? new URLSearchParams(search.startsWith('?') ? search.slice(1) : search)
+			? new URL_SEARCH_PARAMS(search.startsWith('?') ? search.slice(1) : search)
 			: search;
 		parseInto(result, parameters, options);
 	} catch (error) {
 		if (!(error instanceof QueryError)) throw error;
 		if (!options?.deferErrors) throw error;
-		result.parseError = error;
+		return { parseError: error };
 	}
 	return result;
 }

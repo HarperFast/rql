@@ -14,7 +14,7 @@ const FIQL_NAME = /^[a-zA-Z_][a-zA-Z_0-9]*$/;
 
 // ── Value decoding ─────────────────────────────────────────────────────────
 
-export function interpretValue(token: string): Value {
+function interpretValue(token: string): Value {
 	if (token === 'null') return null;
 	if (token === 'true') return true;
 	if (token === 'false') return false;

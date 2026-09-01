@@ -85,6 +85,31 @@ const vectors: { name: string; search: string; expected: ParseResult }[] = [
 		expected: filtered(cond(['code'], 'eq', '0123')),
 	},
 	{
+		name: 'PostgREST timestamps remain schema-free strings',
+		search: 'created_at=gte.2024-01-01T00%3A00%3A00Z',
+		expected: filtered(cond(['created_at'], 'ge', '2024-01-01T00:00:00Z')),
+	},
+	{
+		name: 'PostgREST URLs remain schema-free strings', search: 'homepage=eq.https%3A%2F%2Fexample.com',
+		expected: filtered(cond(['homepage'], 'eq', 'https://example.com')),
+	},
+	{
+		name: 'RQL typed-prefix spelling is ordinary data in PostgREST', search: 'kind=eq.number%3A42',
+		expected: filtered(cond(['kind'], 'eq', 'number:42')),
+	},
+	{
+		name: 'non-roundtrip exponential numerals remain strings', search: 'value=eq.1e3',
+		expected: filtered(cond(['value'], 'eq', '1e3')),
+	},
+	{
+		name: 'non-roundtrip leading-zero numerals remain strings', search: 'value=eq.01',
+		expected: filtered(cond(['value'], 'eq', '01')),
+	},
+	{
+		name: 'roundtrip signed and decimal numerals are interpreted', search: 'low=eq.-5&ratio=eq.2.5',
+		expected: filtered(cond(['low'], 'eq', -5), cond(['ratio'], 'eq', 2.5)),
+	},
+	{
 		name: 'dotted filter keys become path segments', search: 'account.owner=eq.alice',
 		expected: filtered(cond(['account', 'owner'], 'eq', 'alice')),
 	},
@@ -113,6 +138,11 @@ const vectors: { name: string; search: string; expected: ParseResult }[] = [
 		name: 'E.2 logic grammar recursively parses nested and inside or',
 		search: 'or=(a.eq.1,and(b.eq.2,c.eq.3))',
 		expected: grouped('or', cond(['a'], 'eq', 1), group('and', cond(['b'], 'eq', 2), cond(['c'], 'eq', 3))),
+	},
+	{
+		name: 'logic leaves bind the rightmost viable operator after a colliding path segment',
+		search: 'or=(meta.like.eq.5,b.eq.2)',
+		expected: grouped('or', cond(['meta', 'like'], 'eq', 5), cond(['b'], 'eq', 2)),
 	},
 	{
 		name: 'E.2 not.and applies Core De Morgan desugaring', search: 'not.and=(a.eq.1,b.eq.2)',
@@ -326,6 +356,27 @@ describe('PostgREST input and shared-model behavior', () => {
 		);
 	});
 
+	it('keeps delimiters inside quoted column names', () => {
+		assert.deepEqual(
+			parsePostgrest('%22first.name%22=eq.bob'),
+			filtered(cond(['first.name'], 'eq', 'bob')),
+		);
+	});
+
+	it('does not treat a colon inside a quoted select field as an alias', () => {
+		assert.deepEqual(
+			parsePostgrest('select=%22namespace%3Afield%22'),
+			{ select: projection(['namespace:field']) },
+		);
+	});
+
+	it('allows an unquoted operand to end in a quote character', () => {
+		assert.deepEqual(
+			parsePostgrest('title=eq.The+%22Best%22'),
+			filtered(cond(['title'], 'eq', 'The "Best"')),
+		);
+	});
+
 	it('shares canonical literal interpretation with parseQuery', () => {
 		const equivalentPairs = [
 			['age=gte.18', 'age=ge=18'],
@@ -338,9 +389,10 @@ describe('PostgREST input and shared-model behavior', () => {
 			assert.deepEqual(parsePostgrest(postgrest), parseQuery(core));
 	});
 
-	it('supports deferred QueryError results explicitly', () => {
-		const result = parsePostgrest('limit=-1', { deferErrors: true });
+	it('deferred errors never return a partially usable query', () => {
+		const result = parsePostgrest('id=eq.1&limit=5&status=is.unknown', { deferErrors: true });
 		assert.ok(result.parseError instanceof QueryError);
+		assert.deepEqual(Object.keys(result), ['parseError']);
 	});
 });
 
@@ -371,6 +423,20 @@ describe('Unsupported PostgREST features', () => {
 		assert.deepEqual(
 			parsePostgrest('order=id,age.nullsfirst', { onUnsupported: 'drop' }),
 			{ sort: [sort(['id'])] },
+		);
+	});
+
+	it('drop cannot erase the entire projection', () => {
+		assert.throws(
+			() => parsePostgrest('select=display:name', { onUnsupported: 'drop' }),
+			UnsupportedFeature,
+		);
+	});
+
+	it('drop cannot erase every order key', () => {
+		assert.throws(
+			() => parsePostgrest('order=age.nullsfirst', { onUnsupported: 'drop' }),
+			UnsupportedFeature,
 		);
 	});
 
@@ -412,5 +478,15 @@ describe('PostgREST syntax and resource bounds', () => {
 	it('rejects lists beyond the parser value budget as QueryError', () => {
 		const values = Array.from({ length: 1_001 }, (_, index) => String(index)).join(',');
 		assert.throws(() => parsePostgrest(`id=in.(${values})`), QueryError);
+	});
+
+	it('applies the parser term budget to projection fields', () => {
+		const fields = Array.from({ length: 1_001 }, (_, index) => `field${index}`).join(',');
+		assert.throws(() => parsePostgrest(`select=${fields}`), QueryError);
+	});
+
+	it('applies the parser term budget to order keys', () => {
+		const keys = Array.from({ length: 1_001 }, (_, index) => `field${index}`).join(',');
+		assert.throws(() => parsePostgrest(`order=${keys}`), QueryError);
 	});
 });

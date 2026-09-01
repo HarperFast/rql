@@ -19,7 +19,7 @@
 	],
 	"scripts": {
 		"build": "tsc",
-		"test": "node --experimental-strip-types --test test/v2/parse.test.ts test/dialects/postgrest.test.ts",
+		"test": "npm run build && node --experimental-strip-types --test test/v2/parse.test.ts test/dialects/postgrest.test.ts test/dialects/postgrest-dist.test.mjs",
 		"typecheck": "tsc --noEmit"
 	},
 	"devDependencies": {
