@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseQuery, resolveFiqlName } from '../../src/index.ts';
-import type { Condition, Group, ParseResult } from '../../src/index.ts';
+import type { Condition, Group, ElementMatch, ParseResult } from '../../src/index.ts';
 
 // Helpers
 function cond(path: string[], comparator: string, value: unknown, negated?: boolean): Condition {
@@ -167,25 +167,37 @@ describe('Alias desugaring', () => {
 // ---------------------------------------------------------------------------
 
 describe('between desugaring', () => {
-	it('between=(lo,hi) → and-group of ge+le', () => {
+	it('between=(lo,hi) → ElementMatch wrapping ge+le group', () => {
 		const r = parseQuery('age=between=(18,65)');
-		assert.deepEqual(r.filter, andGrp(
-			andGrp(cond(['age'], 'ge', '18'), cond(['age'], 'le', '65')),
-		));
+		// filter is an and-Group with one term: the ElementMatch.
+		const em = r.filter!.terms[0] as ElementMatch;
+		assert.deepEqual(em.path, ['age']);
+		assert.equal(em.some.operator, 'and');
+		assert.equal(em.some.terms.length, 2);
+		assert.equal((em.some.terms[0] as Condition).comparator, 'ge');
+		assert.equal((em.some.terms[0] as Condition).value, '18');
+		assert.deepEqual((em.some.terms[0] as Condition).path, []);
+		assert.equal((em.some.terms[1] as Condition).comparator, 'le');
+		assert.equal((em.some.terms[1] as Condition).value, '65');
+		assert.deepEqual((em.some.terms[1] as Condition).path, []);
+		assert.equal(em.negated, undefined);
 	});
 
-	it('not_between=(lo,hi) → or-group of negated ge+le', () => {
+	it('not_between=(lo,hi) → negated ElementMatch wrapping ge+le group', () => {
 		const r = parseQuery('age=not_between=(18,65)');
-		assert.deepEqual(r.filter, andGrp(
-			orGrp(cond(['age'], 'ge', '18', true), cond(['age'], 'le', '65', true)),
-		));
+		const em = r.filter!.terms[0] as ElementMatch;
+		assert.deepEqual(em.path, ['age']);
+		assert.equal(em.some.operator, 'and');
+		assert.equal(em.negated, true);
+		assert.equal((em.some.terms[0] as Condition).comparator, 'ge');
+		assert.equal((em.some.terms[1] as Condition).comparator, 'le');
 	});
 
 	it('between with typed values', () => {
 		const r = parseQuery('score=between=(number:10,number:99)');
-		const sub = (r.filter!.terms[0] as Group).terms;
-		assert.equal((sub[0] as Condition).value, 10);
-		assert.equal((sub[1] as Condition).value, 99);
+		const em = r.filter!.terms[0] as ElementMatch;
+		assert.equal((em.some.terms[0] as Condition).value, 10);
+		assert.equal((em.some.terms[1] as Condition).value, 99);
 	});
 });
 
@@ -194,24 +206,46 @@ describe('between desugaring', () => {
 // ---------------------------------------------------------------------------
 
 describe('Chaining desugaring', () => {
-	it('age=ge=20&=le=30 → and sub-group of ge+le', () => {
+	// &= means "same-element scope": some one element of path satisfies ALL chained conditions.
+	it('age=ge=20&=le=30 → ElementMatch with element-relative conditions', () => {
 		const r = parseQuery('age=ge=20&=le=30');
-		// Top-level filter is an and-Group wrapping the chain sub-group.
-		const sub = r.filter!.terms[0] as Group;
-		assert.equal(sub.operator, 'and');
-		assert.equal(sub.terms.length, 2);
-		assert.equal((sub.terms[0] as Condition).comparator, 'ge');
-		assert.equal((sub.terms[1] as Condition).comparator, 'le');
-		assert.deepEqual((sub.terms[0] as Condition).path, ['age']);
-		assert.deepEqual((sub.terms[1] as Condition).path, ['age']);
+		const em = r.filter!.terms[0] as ElementMatch;
+		assert.deepEqual(em.path, ['age']);
+		assert.equal(em.some.operator, 'and');
+		assert.equal(em.some.terms.length, 2);
+		assert.equal((em.some.terms[0] as Condition).comparator, 'ge');
+		assert.deepEqual((em.some.terms[0] as Condition).path, []);
+		assert.equal((em.some.terms[1] as Condition).comparator, 'le');
+		assert.deepEqual((em.some.terms[1] as Condition).path, []);
 	});
 
-	it('|= produces or sub-group', () => {
+	it('|= produces ElementMatch with or operator', () => {
 		const r = parseQuery('status=eq=active|=eq=pending');
-		const sub = r.filter!.terms[0] as Group;
-		assert.equal(sub.operator, 'or');
-		assert.equal((sub.terms[0] as Condition).value, 'active');
-		assert.equal((sub.terms[1] as Condition).value, 'pending');
+		const em = r.filter!.terms[0] as ElementMatch;
+		assert.deepEqual(em.path, ['status']);
+		assert.equal(em.some.operator, 'or');
+		assert.equal((em.some.terms[0] as Condition).value, 'active');
+		assert.equal((em.some.terms[1] as Condition).value, 'pending');
+	});
+
+	// Semantic motivation: chained vs un-chained are different for list-valued properties.
+	it('chained vs un-chained produce different canonical shapes (ski-lengths)', () => {
+		// Chained: some ONE skiLength value must be in [175,180].
+		const chained = parseQuery('skiLengths=ge=175&=le=180');
+		// Un-chained: some element ≥175 AND some (possibly different) element ≤180.
+		const unchained = parseQuery('skiLengths=ge=175&skiLengths=le=180');
+
+		const em = chained.filter!.terms[0] as ElementMatch;
+		assert.deepEqual(em.path, ['skiLengths']);
+		assert.equal(em.some.operator, 'and');
+		assert.deepEqual((em.some.terms[0] as Condition).path, []);
+		assert.deepEqual((em.some.terms[1] as Condition).path, []);
+
+		assert.equal(unchained.filter!.terms.length, 2);
+		assert.deepEqual((unchained.filter!.terms[0] as Condition).path, ['skiLengths']);
+		assert.deepEqual((unchained.filter!.terms[1] as Condition).path, ['skiLengths']);
+
+		assert.notDeepEqual(chained.filter, unchained.filter);
 	});
 });
 
