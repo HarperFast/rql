@@ -27,8 +27,8 @@ RQL 2.0 consists of:
 - a **surface grammar** (§4) for conditions, logical composition, and call-style query
   functions, designed to be a compatible superset of HTML form URL encoding and of FIQL;
 - **operator semantics** (§5): a small orthogonal comparator set with uniform negation,
-  typed value literals, range chaining, property paths, and the `select`/`sort`/`limit`
-  functions;
+  typed value literals, element-scoped matching and range chaining, property paths, and
+  the `select`/`sort`/`limit` functions;
 - a **canonical parsed representation** (§6) — the abstract data model every conforming
   parser produces, into which all surface sugar desugars;
 - **conformance profiles** (§8): *Core* (this document, normative) and *Extensions*
@@ -64,45 +64,68 @@ NOT", "RECOMMENDED", "MAY", and "OPTIONAL" are to be interpreted as described in
 5. **Extensible.** FIQL comparator names are an open identifier set — parsers MUST accept
    unknown names syntactically and defer semantic validation to execution. Call-function
    names are a closed set validated at parse time (§5.6).
-6. **Language-neutral.** The canonical representation is defined abstractly; bindings for
-   particular languages map it to native structures but MUST preserve its shape.
+6. **Language-neutral and schema-free.** The canonical representation is defined
+   abstractly and is fully determined by the query string alone — no schema participates
+   in parsing (§5.2). Bindings for particular languages map the model to native
+   structures but MUST preserve its shape.
 
 ## 4. Grammar
 
-Draft ABNF (RFC 5234). §4.1 notes tolerances a parser MAY additionally provide.
+ABNF (RFC 5234), with the tokenization rules below.
 
 ```abnf
-query          = [ group-body ] *( "&" call )
-group-body     = term *( conjunction term )
-               ; all conjunctions within one group-body MUST be identical (§5.4)
+query          = [ q-term *( conjunction q-term ) ]
+q-term         = term / call
+               ; call functions MAY appear only at the top level, and the
+               ; conjunction adjacent to a call MUST be "&"
 conjunction    = "&" / "|"
 term           = condition / chained-cond / group / scoped-match
 group          = "(" group-body ")" / "[" group-body "]"
-scoped-match   = prop-path "[" group-body "]"
+group-body     = term *( conjunction term )
+               ; all conjunctions within one group-body MUST be identical (§5.4)
+scoped-match   = prop-path "[" scoped-body "]"
                ; element-scoped sub-query over the values at prop-path (§5.3);
-               ; inner paths are element-relative
+               ; inner prop-paths are element-relative
+scoped-body    = scoped-term *( conjunction scoped-term )
+scoped-term    = term / elem-cond
+elem-cond      = "=" fiql-name "=" ( value / value-list )
+               ; a comparison on the scoped element itself (empty relative path);
+               ; valid only inside a scoped-match
 
 condition      = prop-path symbol-op value
                / prop-path "=" fiql-name "=" ( value / value-list )
-chained-cond   = ( "&=" / "|=" ) fiql-name "=" value
-               ; continues the preceding condition, scoped to the same element (§5.3)
+chained-cond   = ( "&=" / "|=" ) fiql-name "=" ( value / value-list )
+               ; continues the immediately preceding condition, scoped to the
+               ; same element (§5.3); MUST directly follow a condition or
+               ; another chained-cond
 
 symbol-op      = "=" / "==" / "===" / "!=" / "!==" / "<" / "<=" / ">" / ">="
 fiql-name      = ALPHA-UNDER *( ALPHA-UNDER / DIGIT )
 ALPHA-UNDER    = ALPHA / "_"
 
 prop-path      = prop-segment *( "." prop-segment )
-prop-segment   = 1*seg-char             ; percent-decoded after path splitting (§4.2)
+prop-segment   = 1*seg-char
+seg-char       = ALPHA / DIGIT / "-" / "_" / "~" / pct-encoded
+               ; any other character — including a literal "." (§4.2) — is
+               ; included via percent-encoding
+pct-encoded    = "%" HEXDIG HEXDIG
 
 value          = plain-value / typed-value / wildcard-value
 plain-value    = *vchar
-typed-value    = type-name ":" *vchar   ; §5.2.2
+typed-value    = type-name ":" *vchar           ; §5.2.2
+type-name      = fiql-name
+wildcard-value = *vchar "*"                     ; "*" only as the final
+                                                ; character, only with "==" (§5.1.2)
 value-list     = "(" [ value *( "," value ) ] ")"
-wildcard-value = 1*vchar "*"            ; only with "==" (§5.1.2)
+vchar          = seg-char / ":" / "*" / "+" / "$" / "@" / "!" / "'"
+               ; pragmatically: any character other than the structural
+               ; delimiters & | = , ( ) [ ] { } — those are included via
+               ; percent-encoding
 
 call           = call-name "(" [ call-args ] ")"
 call-name      = 1*( ALPHA / DIGIT / "-" / "_" )
-call-args      = call-arg *( "," call-arg )
+call-args      = call-arg *( "," call-arg ) [ "," ]
+               ; the trailing comma is significant only for select (§5.7)
 call-arg       = value / sort-key / select-item
 sort-key       = [ "+" / "-" ] prop-path
 select-item    = prop-path
@@ -111,6 +134,19 @@ select-item    = prop-path
                / "[" select-list "]"                              ; tuple-shaped rows
 select-list    = select-item *( "," select-item )
 ```
+
+**Tokenization rules.** The grammar above is ambiguous as pure ABNF (`plain-value`
+overlaps other productions); the following rules resolve it deterministically:
+
+1. **Longest match.** Multi-character tokens win over their prefixes: `&=`/`|=` are
+   recognized before `&`/`|`; `<=`, `>=`, `==`, `===`, `!=`, `!==` before `<`, `>`,
+   `=`, `!`.
+2. **A raw `=` never occurs inside a value.** Value scanning stops at the structural
+   delimiters, so a `=` following a value token can only begin a `chained-cond` or the
+   second `=` of a FIQL form.
+3. **A `chained-cond` binds to its predecessor.** It is valid only immediately after a
+   `condition` or another `chained-cond`; anywhere else it is a syntax error.
+4. **Semantic markers are recognized on raw tokens** — see §4.2 rule 4.
 
 ### 4.1 Parsing tolerances
 
@@ -131,6 +167,12 @@ token afterward:
    brackets, braces, commas).
 2. Split property paths on **literal** (unencoded) `.`.
 3. Percent-decode each resulting property segment and each value token.
+4. **Semantic markers are recognized on the raw token, before decoding:** the
+   `type:` prefix of a typed value, the trailing `*` wildcard, and the `+`/`-`
+   sort-direction prefix. A percent-encoded form of a marker character is therefore
+   literal content, never a marker: `x==string%3Anull` is the plain string
+   `string:null` (not a typed literal), `name==Jo%2A` is an equality against `Jo*`
+   (not a wildcard), and `sort(%2Bname)` sorts by the property named `+name`.
 
 Consequently `%2E` within a property segment denotes a literal `.` in that segment's
 name: `a%2Eb==3` is a condition on the single property named `a.b`, while `a.b==3` is a
@@ -149,15 +191,36 @@ The canonical comparator vocabulary is deliberately small and orthogonal:
 |---|---|
 | `eq` | equality |
 | `lt`, `le`, `gt`, `ge` | ordered comparison |
-| `contains` | string substring / collection membership of the value in the property's value |
+| `contains` | string containment: the property's string value contains the given substring |
 | `starts_with`, `ends_with` | string affix match |
-| `in` | property value is a member of the given value list |
+| `in` | the property's value equals a member of the given value list |
 
-**Negation is uniform:** prefixing any Core comparator with `not_` yields its logical
-complement over the collection (`tag=not_in=(a,b)`, `name=not_contains=xyz`,
-`price=not_eq=10`). Negation is set complement: `not_lt` matches every resource `lt`
-does not match, which is *not* equivalent to `ge` for resources where the property is
-absent or incomparable.
+**Comparators are scalar predicates.** Every comparator applies to a single value; when
+a path reaches a list, the existential traversal rule (§5.5) — never the comparator —
+handles the elements. Over `tags: ["credit"]`, `tags=contains=red` matches (some element
+contains the substring `red`), and whole-element equality is simply `tags=credit`. The
+string comparators (`contains`, `starts_with`, `ends_with`) match only string values; a
+non-string value does not match them.
+
+**Negation is uniform and scopes over the condition's own traversal.** Prefixing any
+Core comparator with `not_` complements the set the un-negated condition matches, *at
+the scope where the condition is evaluated*:
+
+- For a top-level condition whose path traverses a list, negation scopes over the
+  existential: `tags=not_eq=urgent` means ¬∃ — it matches only records where **no** tag
+  equals `urgent` (over `tags: ["urgent", "low"]` it does not match).
+- Within an element scope (§5.3), the enclosing scope supplies the quantifier, so a
+  negated inner comparison negates the predicate on the bound element:
+  `ratings=ge=3&=not_eq=4` means ∃x: x ≥ 3 ∧ x ≠ 4. Recursively, an inner condition
+  whose *relative* path traverses a nested list scopes its own negation the same way.
+- The complementary reading ∃x: ¬P(x) ("some element differs") is written as an explicit
+  singleton scope: `tags[=not_eq=urgent]`.
+
+As a consequence of complement semantics, `not_lt` matches every resource `lt` does not
+match — which is *not* equivalent to `ge` for resources where the property is absent or
+incomparable. Negating an entire group or scope has no Core surface form; the name `not`
+is reserved for a future Extension (Appendix C). By De Morgan, leaf-level `not_` already
+expresses the negation of any and/or combination of conditions.
 
 There is exactly one equality (`eq`) and one negation mechanism (`not_`). Notions like
 "strict vs. converting equality" are properties of the *value literal* (§5.2), not of
@@ -166,7 +229,7 @@ or compatibility aliases (Appendix B).
 
 #### 5.1.2 Symbolic operators and sugar (desugaring table)
 
-| Surface form | Canonical form | Value interpretation (§5.2) |
+| Surface form | Canonical form | Value handling (§5.2) |
 |---|---|---|
 | `prop=value` | `eq` | verbatim |
 | `prop===value` | `eq` | verbatim |
@@ -175,7 +238,7 @@ or compatibility aliases (Appendix B).
 | `prop!==value` | `not_` `eq` | verbatim |
 | `prop<v`, `prop<=v`, `prop>v`, `prop>=v` | `lt`, `le`, `gt`, `ge` | interpreted |
 | `prop=name=value` (FIQL) | `name` | interpreted |
-| `prop==stem*` | `starts_with` (trailing `*` removed) | interpreted |
+| `prop==stem*` | `starts_with` (trailing `*` removed) | the stem is the **decoded string**, never an interpreted literal (`name==12*` matches strings starting `12`) |
 
 The trailing-`*` wildcard applies only to `==`; a leading or embedded `*` is a syntax
 error, and wildcards apply to no other comparator.
@@ -185,8 +248,9 @@ Core set (and not a registered Extension or alias) is rejected at execution, not
 parse. This is the language's comparator extension point.
 
 **Value lists** `(v1,v2,…)` are interpreted as lists only for `in`/`not_in` (and the
-`between` compatibility alias, Appendix B); each element is interpreted individually and
-MAY be typed. `()` is the empty list.
+`between` compatibility alias, Appendix B), including in chained legs; each element is
+interpreted individually and MAY be typed. `()` is the empty list. A value list supplied
+to any other comparator is a syntax error.
 
 ### 5.2 Values
 
@@ -204,23 +268,27 @@ A value token is read in one of two modes:
 - **interpreted** — the token is converted by the literal rules below. Used by `==`,
   `!=`, symbolic ordered comparisons, and all FIQL named comparators.
 
-When the target schema declares a type for the property, implementations MAY additionally
-convert the parsed value to the schema type at binding time in either mode.
+**Interpretation is schema-free.** The canonical representation of a query is fully
+determined by the query string alone; the conformance suite (§8) depends on this.
+Binding parsed values to a typed store — converting the string `"3"` to the number 3
+for a numeric column, or 3 to `"3"` for a string column — is an execution-time concern
+outside the canonical model, applicable in either mode.
 
 #### 5.2.2 Literal interpretation rules
 
 | Token | Interpreted value |
 |---|---|
 | `null` | null |
-| `true` / `false` | boolean, when the property is not schema-typed as string |
-| decimal numeral | number, when the property is not schema-typed as string |
+| `true` / `false` | boolean |
+| round-trip decimal numeral | number — a token that equals the canonical decimal rendering of the number it denotes (`3`, `-5`, `2.5`); non-round-trip numeric spellings (`1e3`, `01`, `.5`, `1.50`) remain strings |
 | `number:N` | number (decimal) |
 | `number:$X` | number, `X` in base 36 |
 | `boolean:true` / `boolean:false` | boolean |
 | `date:ISO-8601` / `date:epochMillis` | timestamp |
 | `string:S` | string (suppresses further interpretation) |
 | any other token | percent-decoded string |
-| unknown `type:` prefix | error (client error, HTTP 400) |
+| unknown `type:` prefix | syntax error (client error, HTTP 400) |
+| malformed typed literal (`boolean:yes`, `number:abc`, unparseable `date:`) | syntax error (client error, HTTP 400) |
 
 ### 5.3 Element-scoped matching and range chaining
 
@@ -233,31 +301,40 @@ provides *element scoping*: a way to require that several comparisons hold for t
 or `|=` (or), each followed by a named comparison:
 
 ```
-skiLengths=ge=175&=le=180       ; some ONE length is in [175, 180]
-skiLengths=ge=175&skiLengths=le=180
-                                ; DIFFERENT: some length ≥ 175 AND some
-                                ; (possibly other) length ≤ 180
+ratings=ge=3&=le=4          ; some ONE rating is in [3, 4]
+ratings=ge=3&ratings=le=4   ; DIFFERENT: some rating ≥ 3 AND some
+                            ; (possibly other) rating ≤ 4
 ```
 
-For the record `{ name: "Kris", skiLengths: [172, 174, 181] }`, the chained forms do
-not match, while the two-condition form does (181 witnesses the first condition, 172
-the second).
+For the record `{ sku: "widget-1", ratings: [2, 3, 5] }` the two-condition form matches
+(5 witnesses the first condition, 2 the second)… while `ratings=ge=4&=le=4` over the
+same record does not match and `ratings=ge=3&=le=4` matches only via the element 3.
 
 **Scoped sub-queries** generalize this to object elements: a property path directly
 followed by a bracketed group scopes the whole group to one element, with inner paths
-relative to that element:
+relative to that element. An inner comparison on the element value itself is written
+with no property path (`elem-cond`):
 
 ```
-skis[length=ge=175&width=le=80]   ; some ski is both long and narrow
+reviews[rating=ge=4&helpful=ge=10]   ; some review is both high-rated and helpful
+scores[=ge=10|=le=2]                 ; some score is an outlier (≥10 or ≤2)
+tags[=not_eq=urgent]                 ; some tag differs from "urgent" (∃¬ — contrast
+                                     ; tags=not_eq=urgent, ¬∃, §5.1.1)
 ```
 
-Canonically both forms are an *element-scoped match* (§6): the path plus a group whose
+Canonically all of these are an *element-scoped match* (§6): the path plus a group whose
 conditions have element-relative paths (an empty relative path denotes the element
 value itself, as chained scalar comparisons produce). For a single-valued property,
 element scoping is trivially equivalent to separate conditions; parsers cannot know
-value cardinality, so the scoping structure is always preserved. (Or-chaining is
-logically distributable over the existential quantifier, but it is represented scoped
-as well, for symmetry.)
+value cardinality, so the scoping structure is preserved. (Or-chaining is logically
+distributable over the existential quantifier, but it is represented scoped as well,
+for symmetry.)
+
+A scoped match containing exactly one **non-negated** inner condition is equivalent to
+a plain condition on the concatenated path and normalizes to it: `orders[status=open]`
+≡ `orders.status=open`. A **negated** inner condition is *not* flattened — under
+§5.1.1's scope rule, `tags[=not_eq=urgent]` (∃¬) and `tags=not_eq=urgent` (¬∃) mean
+different things.
 
 Executors are encouraged to execute same-element `ge`/`gt` + `le`/`lt` pairs as a
 single index range scan — for element-indexed lists that scan implements same-element
@@ -276,16 +353,21 @@ semantics naturally.
 Dot syntax addresses nested properties: `brand.name=Microsoft`. Where the data model
 declares relationships, path traversal crosses them; filtering through a relationship
 has inner-join semantics, while projecting an unfiltered relationship via `select` has
-left-join semantics. When a path traverses a list-valued property, a condition matches
-if **any** element matches (existential semantics); to bind several comparisons to the
-same element, use element scoping (§5.3).
+left-join semantics.
+
+When a path traverses a list-valued property, a condition matches if **any** element
+matches (existential semantics); to bind several comparisons to the same element, use
+element scoping (§5.3). **Matching determines membership, not multiplicity:** a query
+yields each matching record at most once, no matter how many elements (or how many
+conditions) witness the match.
 
 Literal dots in property names are expressed with `%2E` (§4.2).
 
 ### 5.6 Call functions
 
-Exactly these call functions are Core; an unrecognized call name is a parse error
-(unlike comparator names, which are open):
+Exactly these call functions are Core. An unrecognized call name — including the
+reserved Extension names of Appendix C — is a parse error (unlike comparator names,
+which are open). A call function appearing more than once in a query is a syntax error.
 
 > **Break from 1.x:** in RQL 1.x, call syntax was the *normalized form* of every
 > operator — `lt(price,10)` was equivalent to `price=lt=10`, and infix forms were sugar.
@@ -297,9 +379,8 @@ Exactly these call functions are Core; an unrecognized call name is a parse erro
 | Function | Semantics |
 |---|---|
 | `select(...)` | Projection (§5.7). |
-| `sort(k1,k2,…)` | Each key optionally prefixed `+` (ascending, default) or `-` (descending); later keys break ties. Keys may be dotted paths. Note: some URL stacks decode a raw `+` as a space in query components; producers SHOULD percent-encode it (`%2B`) or rely on the ascending default. |
-| `limit(end)` / `limit(start,end)` | **Start/end bounds, not offset/count**: `limit(5,10)` means offset 5, at most 5 records. |
-| `group-by(...)` | Reserved. Parsers MUST accept the syntax; Core executors report "not implemented". |
+| `sort(k1,k2,…)` | Each key optionally prefixed `+` (ascending, default) or `-` (descending); later keys break ties. Keys may be dotted paths. The prefix is recognized on the raw token (§4.2): `%2B`/`%2D` are literal name characters, not direction markers. Since some URL stacks decode a raw `+` as a space, producers SHOULD rely on the ascending default rather than writing `+`. |
+| `limit(end)` / `limit(start,end)` | **Start/end bounds, not offset/count**: `limit(5,10)` means offset 5, at most 5 records. Arguments MUST be non-negative decimal integers with end ≥ start; anything else is a syntax error. |
 | `(...)` (anonymous) | Grouping, §5.4. |
 
 ### 5.7 Projection (`select`)
@@ -315,7 +396,9 @@ property path with an optional nested projection:
 | `select(rel{x,y})` / `select(rel[select(x,y)])` | (nested) | field `rel` projected by the nested projection |
 
 The brace and bracket nested forms are equivalent surface spellings of the same nested
-projection.
+projection. **Nested projections are always `records` mode** — `rel{x}` trims the
+related object to `{x}`; the single-field `values` rule applies only at the top level.
+A nested `[x,y]` tuple form (`rel{[x,y]}`) is reserved and currently a syntax error.
 
 ## 6. Canonical parsed representation
 
@@ -356,10 +439,18 @@ Invariants:
 
 - **All sugar is gone.** Aliases are resolved to canonical comparator names; `!=`
   desugars to `negated eq`; wildcards to `starts_with`; chaining and `between` to an
-  ElementMatch; `prop[x=1]` with a single inner condition normalizes to the plain
-  Condition `prop.x=1` (an ElementMatch always scopes two or more comparisons). Two
-  surface queries with the same meaning parse to the same representation.
+  ElementMatch. A scoped match with a single **non-negated** inner condition normalizes
+  to the plain Condition on the concatenated path (`prop[x=1]` ≡ `prop.x=1`); a negated
+  inner condition is never flattened (§5.3).
+- **Desugaring is deterministic:** equivalent sugar forms (aliases, `between` vs.
+  chaining, `!=` vs. `ne`) parse to identical representations. Full semantic
+  canonicalization — group flattening, term reordering — is the province of §7
+  serialization and is NOT asserted here: `a=1` and `(a=1)` may differ
+  representationally.
 - **A condition's `path` is always a segment list**, even for a single segment.
+- Every value in the model is a well-formed member of `Value` — no NaN, no invalid
+  timestamps (§5.2.2 makes malformed literals syntax errors), and `limit`/`offset` are
+  validated non-negative integers (§5.6).
 - `filter` is absent for an unfiltered query; a query with a single condition is an
   `and` group with one term (there is no bare-condition special case).
 - The representation carries no execution or host-framework concerns (no lazy/simple
@@ -368,11 +459,12 @@ Invariants:
 
 ### 6.1 Error model
 
-Structural syntax violations (unbalanced groups, illegal wildcard, unknown call
-function, unknown `type:` prefix) are client errors (HTTP 400 in an HTTP binding).
-Implementations MAY offer a deferred-error mode in which the parser returns a
-representation carrying the error for the execution pipeline to raise, but the canonical
-behavior is to reject at parse.
+Structural syntax violations (unbalanced groups, illegal wildcard, unknown or duplicate
+call function, unknown `type:` prefix, malformed typed or numeric literal, out-of-range
+`limit` arguments) are client errors (HTTP 400 in an HTTP binding). Implementations MAY
+offer a deferred-error mode in which the parser returns a representation carrying the
+error for the execution pipeline to raise, but the canonical behavior is to reject at
+parse.
 
 ## 7. Serialization
 
@@ -384,7 +476,8 @@ Every Query has a canonical string form, defined so that `parse(serialize(q)) = 
   differ from the value's type;
 - `[...]` for all grouping; `%2E` for literal dots in segments;
 - element-scoped matches in chained form (`prop=ge=1&=le=5`) when every inner path is
-  empty, and in scoped-sub-query form (`prop[…]`) otherwise;
+  empty and the scope is not negated, and in scoped-sub-query form (`prop[…]`)
+  otherwise;
 - call functions last, in the order `select`, `sort`, `limit`.
 
 TODO: full normalization rules (value-token escaping table, timestamp formatting,
@@ -393,10 +486,11 @@ ordering guarantees) — needed for cache keys and equivalence testing.
 ## 8. Conformance
 
 - **Core parser:** implements §4–§6 exactly; validated by the conformance suite
-  (`test/v2/` in the reference implementation), which is defined as surface-string →
-  canonical-representation pairs and is therefore language- and implementation-neutral.
-  An implementation with a different internal representation (e.g. Harper) conforms by
-  supplying an adapter from its internal form to the canonical model.
+  (`test/v2/` in the reference implementation), which is defined as **schema-free**
+  surface-string → canonical-representation pairs and is therefore language- and
+  implementation-neutral. An implementation with a different internal representation
+  (e.g. Harper) conforms by supplying an adapter from its internal form to the
+  canonical model.
 - **Core executor:** implements Core comparator/call semantics over a collection.
 - **Extensions (Appendix C):** optional; names are reserved and MUST NOT be repurposed.
 - **Compatibility aliases (Appendix B):** optional; if accepted, they MUST desugar
@@ -421,10 +515,11 @@ regex-free matching guarantees.
 | Nested paths | `foo/bar`, `(foo,bar)` | `foo.bar` |
 | Grouping | `(...)` only | `(...)` and `[...]` |
 | String matching | `re:`/`RE:`/`glob:` converters, `match` | `contains`/`starts_with`/`ends_with`, `==stem*` |
-| Converters | `epoch:`, `isodate:`, `re:`, `glob:` | removed; `date:` accepts ISO-8601 or epoch ms |
+| Converters | open, extensible registry (`epoch:`, `isodate:`, `re:`, `glob:`, custom) | closed typed-prefix set (`number:`, `boolean:`, `date:`, `string:`); unknown or malformed prefix is a syntax error |
 | Positional params | `$1`, `$2` | removed |
-| Negation | none | uniform `not_` comparator prefix |
+| Negation | none | uniform `not_` comparator prefix, scoping over the condition's own traversal (§5.1.1) |
 | Range expression | `between` operator | `&=` / `|=` chaining (canonical); `between` demoted to alias |
+| Collection matching | query-valued `contains(items,gt(price,10))`, `excludes(items,red)`; nested-array/condition arguments in value lists | scoped matches: `items[price=gt=10]`; membership is plain traversal (`items=red`); exclusion is `not_` (`items=not_eq=red`); value lists hold only literals |
 | Sub-selects | none | `rel{x,y}`, `rel[select(x)]`, `select([a,b])` |
 | AST | generic `{name, args}` term tree | typed canonical model (§6); generic terms remain a non-normative encoding for Extensions |
 | Aggregation etc. | Core operators | moved to Extensions profile (Appendix C) |
@@ -440,31 +535,36 @@ or in canonical serialization:
 | `ne` | `not_` `eq` (interpreted value) |
 | `not_equal`, `equals` | `not_` `eq` / `eq` (verbatim value) |
 | `between=(lo,hi)` | element-scoped `ge=lo` AND `le=hi` (≡ `=ge=lo&=le=hi`, inclusive; same-element per §5.3) |
-| `not_between=(lo,hi)` | negation of the above |
+| `not_between=(lo,hi)` | negation of the above (negated ElementMatch) |
 | `sw`, `ew`, `ct`, `includes` | `starts_with`, `ends_with`, `contains`, `contains` |
 | `less_than`, `greater_than`, `lessThan`, `greaterThan`, … | `lt`, `gt`, … |
 | `out` (1.x) | `not_in` |
 | repeated array parameters `prop[]=v1&prop[]=v2` | membership conditions on `prop` (host-framework accommodation; NOT part of the RQL grammar) |
 
-## Appendix C — Extensions profile (reserved from 1.x)
+## Appendix C — Extensions profile (reserved names)
 
-Reserved call-function names carried from RQL 1.x, non-normative pending a future
-revision: `aggregate`, `distinct`, `values`, `sum`, `mean`, `max`, `min`, `count`,
-`first`, `one`, `recurse`, `rel`, `group-by`.
+Reserved call-function names, non-normative pending a future revision — carried from
+RQL 1.x: `aggregate`, `distinct`, `values`, `sum`, `mean`, `max`, `min`, `count`,
+`first`, `one`, `recurse`, `rel`, `group-by`; new in 2.0: `not` (general negation of a
+group or scope, complementing leaf-level `not_`; §5.1.1). Core parsers reject these as
+unknown call functions (§5.6).
 
 ## Appendix D — Known divergences of the Harper implementation
 
 Tracked so the spec stays ideal while implementations converge. As of harper `main`
-(2026-08):
+(2026-09):
 
 | # | Divergence | Spec position |
 |---|---|---|
 | 1 | Simple queries (no structural characters) skip parsing and surface as raw name/value pairs; consumers handle two condition shapes | §6: one canonical shape; lazy representations are a host affordance outside the model |
-| 2 | `&=`/`|=` chains attach to the prior condition as `chainedConditions`; a nameless chain leg (`a=ge=1&=5`) is accepted and inherits the previous leg's comparator | semantically correct (same-element scoping, §5.3); representational divergence only — canonical form is ElementMatch. Nameless legs are a syntax error in 2.0 (the comparator name is required) |
+| 2 | `&=`/`|=` chains attach to the prior condition as `chainedConditions`; a nameless chain leg (`a=ge=1&=5`) is accepted and inherits the previous leg's comparator | semantically correct (same-element scoping, §5.3 — verified on both indexed and unindexed paths, harper PR #2437); representational divergence only — canonical form is ElementMatch. Nameless legs are a syntax error in 2.0 (the comparator name is required) |
 | 3 | Strict vs. converting comparison is modeled as distinct comparators (`equals`/`not_equal` vs `eq`/`ne`) | §5.2: one `eq`; verbatim vs. interpreted is a property of the value literal |
-| 4 | `between` is a first-class comparator | Appendix B alias, desugars to `ge`+`le` |
+| 4 | `between` is a first-class comparator | Appendix B alias, desugars to an element-scoped `ge`+`le` |
 | 5 | Sort is a linked list; select is a polymorphic array with marker properties (`asArray`, `name`) | §6: sort is an ordered list of SortKeys; projection is mode + fields |
 | 6 | `(4)` on a non-list comparator is the literal string `"(4)"` | tolerance only; producers MUST NOT rely on it |
 | 7 | `prop[]=v` repeated-array params accepted in the parser | Appendix B host accommodation, not grammar |
 | 8 | Unknown call-name error and other semantic errors are deferred into the request pipeline (`parseError`) | §6.1: deferred mode is OPTIONAL; canonical behavior rejects at parse |
-| 9 | `group-by(...)` fell through into `sort` handling (missing `break`) | bug; fix in flight (harper dispatch `harper-groupby-fallthrough`) |
+| 9 | `group-by(...)` is accepted at parse (deferred not-implemented error) and falls through into `sort` handling (missing `break`) | 2.0 rejects reserved/unknown call names at parse (§5.6); the fall-through is a bug — fix in flight (dispatch `harper-groupby-fallthrough`) |
+| 10 | Chained legs' values are never type-coerced on the REST path — `age=ge=175&=le=180` builds the mixed-type range `[175, "180"]`, silently returning a superset or empty set | bug — [harper#2433](https://github.com/HarperFast/harper/issues/2433); §5.2's interpreted mode applies uniformly to chained legs |
+| 11 | Secondary indexes over `elements` (multi-value) attributes return one result per matching element — duplicate records; the unindexed path returns each record once | bug — [harper#2434](https://github.com/HarperFast/harper/issues/2434); §5.5: matching determines membership, not multiplicity |
+| 12 | `contains` matches numeric values via decimal-string coercion (`lengths=ct=17` matches 172) | §5.1.1: string comparators match only string values; non-strings do not match |
