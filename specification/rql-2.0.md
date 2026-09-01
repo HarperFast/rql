@@ -17,8 +17,8 @@ years of production use of the RQL/FIQL lineage — most directly in
 RQL 2.0 specifies the *ideal* language: the cleanest coherent semantics for the syntax in
 real-world use. It is deliberately **not** a reverse-engineering of any single
 implementation. Existing implementations (including Harper's) are expected to converge
-toward it; their known divergences are cataloged (Appendix D) rather than normalized into
-the language. The specification is language-neutral: the canonical parsed representation
+toward it, tracking their own divergences in public ledgers (linked from Appendix D)
+rather than having them normalized into the language. The specification is language-neutral: the canonical parsed representation
 (§6) is an abstract data model, intended to support reference implementations in multiple
 programming languages.
 
@@ -79,8 +79,12 @@ q-term         = term / call
                ; call functions MAY appear only at the top level, and the
                ; conjunction adjacent to a call MUST be "&"
 conjunction    = "&" / "|"
-term           = condition / chained-cond / group / scoped-match
+term           = condition / chained-cond / group / scoped-match / not-expr
 group          = "(" group-body ")" / "[" group-body "]"
+not-expr       = "not" "(" group-body ")"
+               ; logical negation of the body (§5.4); a term form, NOT a call
+               ; function — "not" followed by "(" is recognized as negation in
+               ; every term position, including the top level
 group-body     = term *( conjunction term )
                ; all conjunctions within one group-body MUST be identical (§5.4)
 scoped-match   = prop-path "[" scoped-body "]"
@@ -218,9 +222,8 @@ the scope where the condition is evaluated*:
 
 As a consequence of complement semantics, `not_lt` matches every resource `lt` does not
 match — which is *not* equivalent to `ge` for resources where the property is absent or
-incomparable. Negating an entire group or scope has no Core surface form; the name `not`
-is reserved for a future Extension (Appendix C). By De Morgan, leaf-level `not_` already
-expresses the negation of any and/or combination of conditions.
+incomparable. Entire groups and scopes are negated with `not(...)` (§5.4), which
+desugars to these leaf and scope negations.
 
 There is exactly one equality (`eq`) and one negation mechanism (`not_`). Notions like
 "strict vs. converting equality" are properties of the *value literal* (§5.2), not of
@@ -330,11 +333,13 @@ value cardinality, so the scoping structure is preserved. (Or-chaining is logica
 distributable over the existential quantifier, but it is represented scoped as well,
 for symmetry.)
 
-A scoped match containing exactly one **non-negated** inner condition is equivalent to
-a plain condition on the concatenated path and normalizes to it: `orders[status=open]`
-≡ `orders.status=open`. A **negated** inner condition is *not* flattened — under
-§5.1.1's scope rule, `tags[=not_eq=urgent]` (∃¬) and `tags=not_eq=urgent` (¬∃) mean
-different things.
+A non-negated scoped match containing exactly one **non-negated** inner condition is
+equivalent to a plain condition on the concatenated path and normalizes to it:
+`orders[status=open]` ≡ `orders.status=open`, and likewise for an element condition —
+`scores[=ge=10]` ≡ `scores=ge=10` (a plain condition on a list path is already
+existential). A **negated** inner condition (or a negated scope) is *not* flattened —
+under §5.1.1's scope rule, `tags[=not_eq=urgent]` (∃¬) and `tags=not_eq=urgent` (¬∃)
+mean different things.
 
 Executors are encouraged to execute same-element `ge`/`gt` + `le`/`lt` pairs as a
 single index range scan — for element-indexed lists that scan implements same-element
@@ -347,6 +352,26 @@ semantics naturally.
   to disambiguate: `a=1&[b=2|c=3]`.
 - `(...)` and `[...]` are semantically identical groupings (see §4.1 for why brackets are
   RECOMMENDED in generated queries).
+
+**Negation of a group or scope.** `not(body)` complements the match of its body and may
+appear wherever a term may:
+
+```
+status=open&not(tag=urgent|tag=blocked)
+not(scores[=ge=10&=le=20])        ; NO element is in [10, 20]
+```
+
+`not(...)` is pure sugar: parsers MUST desugar it by pushing negation inward, which is
+exactly meaning-preserving because negation is set complement (§5.1.1):
+
+- `not(` condition `)` toggles the condition's `negated` flag (≡ the `not_` prefix);
+- `not(` and-group `)` becomes the or-group of the negated terms, and vice versa
+  (De Morgan, applied recursively);
+- `not(` scoped-match `)` toggles the ElementMatch's `negated` flag;
+- nested `not` cancels.
+
+Consequently `not` never appears in the canonical representation (§6) or in canonical
+serialization (§7) except as the spelling of a negated ElementMatch.
 
 ### 5.5 Property paths
 
@@ -368,6 +393,8 @@ Literal dots in property names are expressed with `%2E` (§4.2).
 Exactly these call functions are Core. An unrecognized call name — including the
 reserved Extension names of Appendix C — is a parse error (unlike comparator names,
 which are open). A call function appearing more than once in a query is a syntax error.
+`not(...)` (§5.4) is not a call function: it is a term-position logical form, and its
+name is excluded from the call-function namespace.
 
 > **Break from 1.x:** in RQL 1.x, call syntax was the *normalized form* of every
 > operator — `lt(price,10)` was equivalent to `price=lt=10`, and infix forms were sugar.
@@ -439,9 +466,10 @@ Invariants:
 
 - **All sugar is gone.** Aliases are resolved to canonical comparator names; `!=`
   desugars to `negated eq`; wildcards to `starts_with`; chaining and `between` to an
-  ElementMatch. A scoped match with a single **non-negated** inner condition normalizes
-  to the plain Condition on the concatenated path (`prop[x=1]` ≡ `prop.x=1`); a negated
-  inner condition is never flattened (§5.3).
+  ElementMatch; `not(...)` desugars into leaf/scope negation flags (§5.4). A non-negated
+  scoped match with a single non-negated inner condition normalizes to the plain
+  Condition on the concatenated path (`prop[x=1]` ≡ `prop.x=1`, `prop[=ge=10]` ≡
+  `prop=ge=10`); a negated inner condition or scope is never flattened (§5.3).
 - **Desugaring is deterministic:** equivalent sugar forms (aliases, `between` vs.
   chaining, `!=` vs. `ne`) parse to identical representations. Full semantic
   canonicalization — group flattening, term reordering — is the province of §7
@@ -476,8 +504,8 @@ Every Query has a canonical string form, defined so that `parse(serialize(q)) = 
   differ from the value's type;
 - `[...]` for all grouping; `%2E` for literal dots in segments;
 - element-scoped matches in chained form (`prop=ge=1&=le=5`) when every inner path is
-  empty and the scope is not negated, and in scoped-sub-query form (`prop[…]`)
-  otherwise;
+  empty and the scope is not negated, in scoped-sub-query form (`prop[…]`) otherwise,
+  and negated scopes as `not(prop[…])`;
 - call functions last, in the order `select`, `sort`, `limit`.
 
 TODO: full normalization rules (value-token escaping table, timestamp formatting,
@@ -517,7 +545,7 @@ regex-free matching guarantees.
 | String matching | `re:`/`RE:`/`glob:` converters, `match` | `contains`/`starts_with`/`ends_with`, `==stem*` |
 | Converters | open, extensible registry (`epoch:`, `isodate:`, `re:`, `glob:`, custom) | closed typed-prefix set (`number:`, `boolean:`, `date:`, `string:`); unknown or malformed prefix is a syntax error |
 | Positional params | `$1`, `$2` | removed |
-| Negation | none | uniform `not_` comparator prefix, scoping over the condition's own traversal (§5.1.1) |
+| Negation | none | uniform `not_` comparator prefix scoping over the condition's own traversal (§5.1.1), plus `not(...)` group/scope negation (§5.4) |
 | Range expression | `between` operator | `&=` / `|=` chaining (canonical); `between` demoted to alias |
 | Collection matching | query-valued `contains(items,gt(price,10))`, `excludes(items,red)`; nested-array/condition arguments in value lists | scoped matches: `items[price=gt=10]`; membership is plain traversal (`items=red`); exclusion is `not_` (`items=not_eq=red`); value lists hold only literals |
 | Sub-selects | none | `rel{x,y}`, `rel[select(x)]`, `select([a,b])` |
@@ -545,26 +573,17 @@ or in canonical serialization:
 
 Reserved call-function names, non-normative pending a future revision — carried from
 RQL 1.x: `aggregate`, `distinct`, `values`, `sum`, `mean`, `max`, `min`, `count`,
-`first`, `one`, `recurse`, `rel`, `group-by`; new in 2.0: `not` (general negation of a
-group or scope, complementing leaf-level `not_`; §5.1.1). Core parsers reject these as
-unknown call functions (§5.6).
+`first`, `one`, `recurse`, `rel`, `group-by`. Core parsers reject these as unknown call
+functions (§5.6). (`not` is not on this list — it is a Core term form, §5.4.)
 
-## Appendix D — Known divergences of the Harper implementation
+## Appendix D — Implementation divergence tracking
 
-Tracked so the spec stays ideal while implementations converge. As of harper `main`
-(2026-09):
+This specification is implementation-independent; it does not track any vendor's bugs
+or gaps. An implementation converges by maintaining its own public divergence ledger —
+each entry naming the deviating behavior, its class (bug, feature gap, or permitted
+representational difference per §8's adapter rule), and the spec clause it converges
+to.
 
-| # | Divergence | Spec position |
-|---|---|---|
-| 1 | Simple queries (no structural characters) skip parsing and surface as raw name/value pairs; consumers handle two condition shapes | §6: one canonical shape; lazy representations are a host affordance outside the model |
-| 2 | `&=`/`|=` chains attach to the prior condition as `chainedConditions`; a nameless chain leg (`a=ge=1&=5`) is accepted and inherits the previous leg's comparator | semantically correct (same-element scoping, §5.3 — verified on both indexed and unindexed paths, harper PR #2437); representational divergence only — canonical form is ElementMatch. Nameless legs are a syntax error in 2.0 (the comparator name is required) |
-| 3 | Strict vs. converting comparison is modeled as distinct comparators (`equals`/`not_equal` vs `eq`/`ne`) | §5.2: one `eq`; verbatim vs. interpreted is a property of the value literal |
-| 4 | `between` is a first-class comparator | Appendix B alias, desugars to an element-scoped `ge`+`le` |
-| 5 | Sort is a linked list; select is a polymorphic array with marker properties (`asArray`, `name`) | §6: sort is an ordered list of SortKeys; projection is mode + fields |
-| 6 | `(4)` on a non-list comparator is the literal string `"(4)"` | tolerance only; producers MUST NOT rely on it |
-| 7 | `prop[]=v` repeated-array params accepted in the parser | Appendix B host accommodation, not grammar |
-| 8 | Unknown call-name error and other semantic errors are deferred into the request pipeline (`parseError`) | §6.1: deferred mode is OPTIONAL; canonical behavior rejects at parse |
-| 9 | `group-by(...)` is accepted at parse (deferred not-implemented error) and falls through into `sort` handling (missing `break`) | 2.0 rejects reserved/unknown call names at parse (§5.6); the fall-through is a bug — fix in flight (dispatch `harper-groupby-fallthrough`) |
-| 10 | Chained legs' values are never type-coerced on the REST path — `age=ge=175&=le=180` builds the mixed-type range `[175, "180"]`, silently returning a superset or empty set | bug — [harper#2433](https://github.com/HarperFast/harper/issues/2433); §5.2's interpreted mode applies uniformly to chained legs |
-| 11 | Secondary indexes over `elements` (multi-value) attributes return one result per matching element — duplicate records; the unindexed path returns each record once | bug — [harper#2434](https://github.com/HarperFast/harper/issues/2434); §5.5: matching determines membership, not multiplicity |
-| 12 | `contains` matches numeric values via decimal-string coercion (`lengths=ct=17` matches 172) | §5.1.1: string comparators match only string values; non-strings do not match |
+Known ledgers:
+
+- **Harper** — [HarperFast/harper#2440](https://github.com/HarperFast/harper/issues/2440)
