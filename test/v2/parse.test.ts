@@ -67,16 +67,16 @@ describe('Ordered comparators', () => {
 	it('< > <= >=', () => {
 		const r = parseQuery('price<10&qty<=5&age>18&score>=90');
 		assert.deepEqual(r.filter, andGrp(
-			cond(['price'], 'lt', '10'),
-			cond(['qty'], 'le', '5'),
-			cond(['age'], 'gt', '18'),
-			cond(['score'], 'ge', '90'),
+			cond(['price'], 'lt', 10),
+			cond(['qty'], 'le', 5),
+			cond(['age'], 'gt', 18),
+			cond(['score'], 'ge', 90),
 		));
 	});
 
 	it('FIQL lt/le/gt/ge', () => {
 		const r = parseQuery('age=gt=4');
-		assert.deepEqual(r.filter, andGrp(cond(['age'], 'gt', '4')));
+		assert.deepEqual(r.filter, andGrp(cond(['age'], 'gt', 4)));
 	});
 });
 
@@ -94,7 +94,7 @@ describe('OR query', () => {
 		const r = parseQuery('id=1&(value=gt=4|name=2)');
 		assert.deepEqual(r.filter, andGrp(
 			cond(['id'], 'eq', '1'),
-			orGrp(cond(['value'], 'gt', '4'), cond(['name'], 'eq', '2')),
+			orGrp(cond(['value'], 'gt', 4), cond(['name'], 'eq', '2')),
 		));
 	});
 
@@ -122,7 +122,7 @@ describe('OR query', () => {
 describe('Alias desugaring', () => {
 	it('ne → negated eq', () => {
 		const r = parseQuery('a=ne=1');
-		assert.deepEqual(r.filter, andGrp(cond(['a'], 'eq', '1', true)));
+		assert.deepEqual(r.filter, andGrp(cond(['a'], 'eq', 1, true)));
 	});
 
 	it('equals → eq (verbatim)', () => {
@@ -138,7 +138,7 @@ describe('Alias desugaring', () => {
 	it('ne and != produce same canonical form (interpreted)', () => {
 		const a = parseQuery('x=ne=1');
 		const b = parseQuery('x!=1');
-		// Both → negated eq, interpreted (both have string '1' since 1 is a bare number token)
+		// Both → negated eq, interpreted (numeral auto-converts: value is number 1)
 		assert.deepEqual(a.filter, b.filter);
 	});
 
@@ -149,8 +149,8 @@ describe('Alias desugaring', () => {
 	});
 
 	it('less_than / greaterThan aliases', () => {
-		assert.deepEqual(parseQuery('a=less_than=5').filter, andGrp(cond(['a'], 'lt', '5')));
-		assert.deepEqual(parseQuery('a=greaterThan=5').filter, andGrp(cond(['a'], 'gt', '5')));
+		assert.deepEqual(parseQuery('a=less_than=5').filter, andGrp(cond(['a'], 'lt', 5)));
+		assert.deepEqual(parseQuery('a=greaterThan=5').filter, andGrp(cond(['a'], 'gt', 5)));
 	});
 
 	it('out → negated in', () => {
@@ -158,7 +158,7 @@ describe('Alias desugaring', () => {
 		const c = r.filter!.terms[0] as Condition;
 		assert.equal(c.comparator, 'in');
 		assert.equal(c.negated, true);
-		assert.deepEqual(c.value, ['1', '2']);
+		assert.deepEqual(c.value, [1, 2]);
 	});
 });
 
@@ -175,10 +175,10 @@ describe('between desugaring', () => {
 		assert.equal(em.some.operator, 'and');
 		assert.equal(em.some.terms.length, 2);
 		assert.equal((em.some.terms[0] as Condition).comparator, 'ge');
-		assert.equal((em.some.terms[0] as Condition).value, '18');
+		assert.equal((em.some.terms[0] as Condition).value, 18);
 		assert.deepEqual((em.some.terms[0] as Condition).path, []);
 		assert.equal((em.some.terms[1] as Condition).comparator, 'le');
-		assert.equal((em.some.terms[1] as Condition).value, '65');
+		assert.equal((em.some.terms[1] as Condition).value, 65);
 		assert.deepEqual((em.some.terms[1] as Condition).path, []);
 		assert.equal(em.negated, undefined);
 	});
@@ -569,5 +569,63 @@ describe('resolveFiqlName', () => {
 		const r = resolveFiqlName('fuzzy_match');
 		assert.equal(r.comparator, 'fuzzy_match');
 		assert.equal(r.negated, false);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Verbatim vs interpreted distinction, group chaining, nested projection mode
+// ---------------------------------------------------------------------------
+
+describe('Verbatim vs interpreted values (§5.2)', () => {
+	it('a==3 (interpreted) parses to number, a=3 / a===3 (verbatim) to string', () => {
+		assert.deepEqual(parseQuery('a==3').filter, andGrp(cond(['a'], 'eq', 3)));
+		assert.deepEqual(parseQuery('a=3').filter, andGrp(cond(['a'], 'eq', '3')));
+		assert.deepEqual(parseQuery('a===3').filter, andGrp(cond(['a'], 'eq', '3')));
+	});
+
+	it('non-roundtrip numerals stay strings in interpreted mode', () => {
+		assert.deepEqual(parseQuery('a==1e3').filter, andGrp(cond(['a'], 'eq', '1e3')));
+	});
+});
+
+describe('Chain legs require a comparator name (§4 grammar)', () => {
+	it('a=ge=1&=5 throws', () => {
+		assert.throws(() => parseQuery('a=ge=1&=5'), /chain leg requires a comparator name/);
+	});
+});
+
+describe('Chaining inside groups keeps element scoping (§5.3)', () => {
+	it('(skiLengths=ge=175&=le=180) → ElementMatch, same as un-grouped', () => {
+		const grouped = parseQuery('(skiLengths=ge=175&=le=180)');
+		const inner = grouped.filter!.terms[0] as Group;
+		const em = inner.terms[0] as ElementMatch;
+		assert.deepEqual(em, {
+			path: ['skiLengths'],
+			some: { operator: 'and', terms: [
+				{ path: [], comparator: 'ge', value: 175 },
+				{ path: [], comparator: 'le', value: 180 },
+			] },
+		});
+	});
+
+	it('chained legs inside a bracket scoped-match stay grouped', () => {
+		const r = parseQuery('a=1&[skiLengths=ge=175&=le=180]');
+		const grp = r.filter!.terms[1] as Group;
+		const em = grp.terms[0] as ElementMatch;
+		assert.deepEqual(em.path, ['skiLengths']);
+		assert.equal(em.some.terms.length, 2);
+	});
+});
+
+describe('Nested projections are records mode (§5.7)', () => {
+	it('select(name,brand{name}) → nested single-field projection trims the object', () => {
+		const r = parseQuery('select(name,brand{name})');
+		assert.deepEqual(r.select, {
+			mode: 'records',
+			fields: [
+				{ path: ['name'] },
+				{ path: ['brand'], projection: { mode: 'records', fields: [{ path: ['name'] }] } },
+			],
+		});
 	});
 });

@@ -41,7 +41,7 @@ export interface Projection {
 }
 
 export interface ParseResult {
-	filter?: Group | ElementMatch;
+	filter?: Group;
 	sort?: SortKey[];
 	select?: Projection;
 	limit?: number;

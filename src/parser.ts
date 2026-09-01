@@ -7,7 +7,9 @@ import type {
 // QP: tokenises attribute names and structural operators.
 // VP: tokenises value tokens (includes ( ) , as plain chars; excludes & | = [ ] { }).
 // Both are created fresh per parseQuery call for reentrancy.
-const QP_SRC = '([^?&|=<>!([{\\}\\]),]*)([([{\\}\\])|,&]|[=<>!]*)';
+// [&|]= first: the chain operators are two-char tokens and must win over
+// the single-char structural match.
+const QP_SRC = '([^?&|=<>!([{\\}\\]),]*)([&|]=|[([{\\}\\])|,&]|[=<>!]*)';
 const VP_SRC = '([^&|=\\[\\]{}]*)([\\[\\]{}]|[&|=]*)';
 
 const FIQL_NAME = /^[a-zA-Z_][a-zA-Z_0-9]*$/;
@@ -30,6 +32,10 @@ function interpretValue(token: string): Value {
 			default: throw new QueryError(`Unknown type prefix '${type}'`);
 		}
 	}
+	// §5.2.2: decimal numerals auto-convert in interpreted mode (round-trip rule),
+	// keeping interpreted `a==3` distinct from verbatim `a=3`.
+	const n = +token;
+	if (token !== '' && !isNaN(n) && String(n) === token) return n;
 	return decodeURIComponent(token);
 }
 
@@ -98,6 +104,22 @@ function accToGroup(acc: Acc): Group | undefined {
 	return { operator: acc.operator ?? 'and', terms: acc.terms };
 }
 
+// §6 invariant: an ElementMatch scoping a single plain condition normalizes to an
+// ordinary Condition with the concatenated path.
+function pushElementMatch(acc: Acc, em: ElementMatch): void {
+	const t = em.some.terms;
+	if (t.length === 1 && !('some' in t[0]) && !('terms' in t[0]) && !em.negated) {
+		const ic = t[0] as Condition;
+		const merged: Condition = { path: [...em.path, ...ic.path], comparator: ic.comparator, value: ic.value };
+		if (ic.negated) merged.negated = true;
+		acc.terms.push(merged);
+		acc.lastPath = merged.path;
+	} else {
+		acc.terms.push(em);
+		acc.lastPath = em.path;
+	}
+}
+
 // ── Main parse function ────────────────────────────────────────────────────
 
 export function parseQuery(search: string, options?: ParseOptions): ParseResult {
@@ -124,6 +146,15 @@ export function parseQuery(search: string, options?: ParseOptions): ParseResult 
 		let rawComp: string | undefined;
 		let fiqlMode = false;
 		let chainPath: string[] | undefined;
+		let activeEM: ElementMatch | undefined;
+
+		function closeEM(): void {
+			if (activeEM) {
+				pushElementMatch(acc, activeEM);
+				activeEM = undefined;
+				chainPath = undefined;
+			}
+		}
 
 		function finishCond(rawVal: string): void {
 			if (path === undefined) return;
@@ -151,15 +182,28 @@ export function parseQuery(search: string, options?: ParseOptions): ParseResult 
 				const sym = SYMBOL_OPS[rc];
 				if (!sym) {
 					recordError(`unknown operator '${rc}'`);
-					path = undefined; rawComp = undefined; fiqlMode = false; chainPath = undefined;
+					path = undefined; rawComp = undefined; fiqlMode = false;
+					if (!activeEM) chainPath = undefined;
 					return;
 				}
 				term = makeCondition(rp, sym.comparator, sym.negated, rawVal, sym.verbatim);
 			}
 
-			acc.lastPath = rp;
-			acc.terms.push(term);
-			path = undefined; rawComp = undefined; fiqlMode = false; chainPath = undefined;
+			if (activeEM) {
+				const addLeg = (c: Condition): void => {
+					const relPath = c.path.slice(activeEM!.path.length);
+					const ec: Condition = { path: relPath, comparator: c.comparator, value: c.value };
+					if (c.negated) ec.negated = true;
+					activeEM!.some.terms.push(ec);
+				};
+				if ('some' in term) for (const leg of (term as ElementMatch).some.terms) addLeg(leg as Condition);
+				else addLeg(term as Condition);
+			} else {
+				acc.lastPath = rp;
+				acc.terms.push(term);
+			}
+			path = undefined; rawComp = undefined; fiqlMode = false;
+			// chainPath / activeEM persist across chain legs.
 		}
 
 		qp.lastIndex = pos;
@@ -191,16 +235,35 @@ export function parseQuery(search: string, options?: ParseOptions): ParseResult 
 				case '&': case '|': {
 					const lop: 'and' | 'or' = op === '&' ? 'and' : 'or';
 					if (path !== undefined) finishCond(val);
+					else if (chainPath !== undefined && val) recordError(`chain leg requires a comparator name before '${val}'`);
+					closeEM();
 					setGroupOp(acc, lop, recordError);
 					break;
 				}
-				case '&=': case '|=':
+				case '&=': case '|=': {
+					const cop: 'and' | 'or' = op === '&=' ? 'and' : 'or';
 					if (path !== undefined) finishCond(val);
-					chainPath = acc.lastPath ?? (acc.terms.at(-1) as Condition | undefined)?.path;
-					if (!chainPath) recordError('no preceding condition for &=/|=');
+					if (activeEM) {
+						if (cop !== activeEM.some.operator) recordError('cannot mix & and | within a chain');
+					} else {
+						const prev = acc.terms.pop();
+						if (!prev || 'some' in prev || 'terms' in prev) {
+							if (prev) acc.terms.push(prev);
+							recordError('no preceding condition for &=/|=');
+							break;
+						}
+						const prevCond = prev as Condition;
+						chainPath = prevCond.path;
+						const relCond: Condition = { path: [], comparator: prevCond.comparator, value: prevCond.value };
+						if (prevCond.negated) relCond.negated = true;
+						activeEM = { path: chainPath, some: { operator: cop, terms: [relCond] } };
+						acc.lastPath = undefined;
+					}
 					break;
+				}
 				case '': case undefined:
 					if (path !== undefined) finishCond(val);
+					else if (chainPath !== undefined && val) recordError(`chain leg requires a comparator name before '${val}'`);
 					break;
 				case ',':
 					recordError("unexpected ','");
@@ -211,7 +274,7 @@ export function parseQuery(search: string, options?: ParseOptions): ParseResult 
 					const inner = parseCondGroup(')');
 					pos = qp.lastIndex;
 					const grp = accToGroup(inner);
-					if (grp) { acc.terms.push(grp); acc.lastPath = undefined; }
+					if (grp) { closeEM(); acc.terms.push(grp); acc.lastPath = undefined; }
 					break;
 				}
 				case '[': {
@@ -223,13 +286,9 @@ export function parseQuery(search: string, options?: ParseOptions): ParseResult 
 						const innerGrp = accToGroup(inner);
 						if (!innerGrp) {
 							recordError(`empty bracket group for '${val}'`);
-						} else if (innerGrp.terms.length === 1 && !('some' in innerGrp.terms[0])) {
-							const ic = innerGrp.terms[0] as Condition;
-							const merged: Condition = { path: [...ePath, ...ic.path], comparator: ic.comparator, value: ic.value };
-							if (ic.negated) merged.negated = true;
-							acc.terms.push(merged); acc.lastPath = merged.path;
 						} else {
-							acc.terms.push({ path: ePath, some: innerGrp }); acc.lastPath = ePath;
+							closeEM();
+							pushElementMatch(acc, { path: ePath, some: innerGrp });
 						}
 					} else {
 						qp.lastIndex = pos;
@@ -245,6 +304,7 @@ export function parseQuery(search: string, options?: ParseOptions): ParseResult 
 					if (closeCh === ch) {
 						if (path !== undefined) finishCond(val);
 						else if (val) recordError(`unexpected value without path '${val}'`);
+						closeEM();
 						return acc;
 					}
 					recordError(closeCh ? `expected '${closeCh}', got '${ch}'` : `unexpected '${ch}'`);
@@ -258,6 +318,7 @@ export function parseQuery(search: string, options?: ParseOptions): ParseResult 
 			if (pos === search.length) break;
 		}
 		if (closeCh) recordError(`expected '${closeCh}', got end of string`);
+		closeEM();
 		return acc;
 	}
 
@@ -334,8 +395,7 @@ export function parseQuery(search: string, options?: ParseOptions): ParseResult 
 
 	function closeActiveEM(): void {
 		if (activeEM) {
-			topAcc.terms.push(activeEM);
-			topAcc.lastPath = activeEM.path;
+			pushElementMatch(topAcc, activeEM);
 			activeEM = undefined;
 			chainPath = undefined;
 		}
@@ -442,17 +502,20 @@ export function parseQuery(search: string, options?: ParseOptions): ParseResult 
 		return fields;
 	}
 
-	function rawFieldsToProjection(fields: RawField[], trailingComma: boolean): Projection {
+	function rawFieldsToProjection(fields: RawField[], trailingComma: boolean, nested = false): Projection {
 		if (fields.length === 1 && fields[0].tuple) {
 			return { mode: 'tuples', fields: (fields[0].nested ?? []).map(rawToField) };
 		}
 		const fs = fields.map(rawToField);
-		const mode: 'values' | 'records' = (fs.length === 1 && !fields[0].nested && !trailingComma) ? 'values' : 'records';
+		// The single-field `values` mode is a top-level surface form only (§5.7);
+		// nested projections trim the object (`records`), matching sub-select semantics.
+		const mode: 'values' | 'records' =
+			(!nested && fs.length === 1 && !fields[0].nested && !trailingComma) ? 'values' : 'records';
 		return { mode, fields: fs };
 	}
 
 	function rawToField(rf: RawField): Field {
-		if (rf.nested) return { path: rf.path, projection: rawFieldsToProjection(rf.nested, false) };
+		if (rf.nested) return { path: rf.path, projection: rawFieldsToProjection(rf.nested, false, true) };
 		return { path: rf.path };
 	}
 
@@ -492,7 +555,8 @@ export function parseQuery(search: string, options?: ParseOptions): ParseResult 
 						if (cop !== activeEM.some.operator) recordError('cannot mix & and | within a chain');
 					} else {
 						const prev = topAcc.terms.pop();
-						if (!prev || 'some' in prev) {
+						if (!prev || 'some' in prev || 'terms' in prev) {
+							if (prev) topAcc.terms.push(prev);
 							recordError('no preceding Condition to chain onto'); break;
 						}
 						const prevCond = prev as Condition;
@@ -534,6 +598,7 @@ export function parseQuery(search: string, options?: ParseOptions): ParseResult 
 			case '&': case '|': {
 				const lop: 'and' | 'or' = op === '&' ? 'and' : 'or';
 				if (path !== undefined) finishTopCond(val);
+				else if (chainPath !== undefined && val) recordError(`chain leg requires a comparator name before '${val}'`);
 				closeActiveEM();
 				setGroupOp(topAcc, lop, recordError);
 				break;
@@ -559,6 +624,7 @@ export function parseQuery(search: string, options?: ParseOptions): ParseResult 
 			}
 			case '': case undefined:
 				if (path !== undefined) finishTopCond(val);
+				else if (chainPath !== undefined && val) recordError(`chain leg requires a comparator name before '${val}'`);
 				break;
 			case ',':
 				recordError("unexpected ','");
