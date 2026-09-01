@@ -664,15 +664,15 @@ describe('Negated-inner ElementMatch is NOT flattened (§5.3)', () => {
 // ---------------------------------------------------------------------------
 
 describe('Element-scoped match (prop[...])', () => {
-	it('scores[=ge=10] → ElementMatch with elem-cond path=[]', () => {
+	it('scores[=ge=10] → plain Condition (single non-negated elem-cond flattens per §5.5)', () => {
+		// Plain Conditions on list paths are already existential (§5.5).
+		// scores[=ge=10] ≡ scores=ge=10 — both read as ∃x≥10.
 		const r = parseQuery('scores[=ge=10]');
-		const em = r.filter!.terms[0] as ElementMatch;
-		assert.ok('some' in em);
-		assert.deepEqual(em.path, ['scores']);
-		const ic = em.some.terms[0] as Condition;
-		assert.deepEqual(ic.path, []);
-		assert.equal(ic.comparator, 'ge');
-		assert.equal(ic.value, 10);
+		const c = r.filter!.terms[0] as Condition;
+		assert.ok(!('some' in c), 'should flatten to a plain Condition');
+		assert.deepEqual(c.path, ['scores']);
+		assert.equal(c.comparator, 'ge');
+		assert.equal(c.value, 10);
 	});
 
 	it('scores[=ge=10|=le=2] → ElementMatch with two elem-conds (or)', () => {
@@ -863,5 +863,79 @@ describe('Raw-token marker pins (§4.2 rule 4)', () => {
 	it('sort(-age) → path ["age"] descending (raw - IS a direction marker)', () => {
 		const r = parseQuery('sort(-age)');
 		assert.deepEqual(r.sort, [{ path: ['age'], direction: 'desc' }]);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// §5.4 not(...) De Morgan desugaring
+// ---------------------------------------------------------------------------
+
+describe('not(...) De Morgan desugaring (§5.4)', () => {
+	it('not(a=1) ≡ a=not_equal=1 — single condition toggles negated (both verbatim)', () => {
+		// `=` is verbatim, so value is string '1'; not_equal is also verbatim.
+		const direct = parseQuery('a=not_equal=1');
+		const negated = parseQuery('not(a=1)');
+		assert.deepEqual(negated.filter, direct.filter);
+	});
+
+	it('status=open&not(tag=urgent|tag=blocked) → and[eq(status,open), and[neg(tag,urgent), neg(tag,blocked)]]', () => {
+		const r = parseQuery('status=open&not(tag=urgent|tag=blocked)');
+		assert.equal(r.filter!.operator, 'and');
+		assert.equal(r.filter!.terms.length, 2);
+		const first = r.filter!.terms[0] as Condition;
+		assert.deepEqual(first.path, ['status']);
+		assert.equal(first.comparator, 'eq');
+		const second = r.filter!.terms[1] as Group;
+		assert.equal(second.operator, 'and');
+		assert.equal(second.terms.length, 2);
+		assert.equal((second.terms[0] as Condition).negated, true);
+		assert.equal((second.terms[1] as Condition).negated, true);
+		assert.deepEqual((second.terms[0] as Condition).path, ['tag']);
+		assert.deepEqual((second.terms[1] as Condition).path, ['tag']);
+	});
+
+	it('not(scores[=ge=10&=le=20]) → negated ElementMatch (NO element in [10,20])', () => {
+		const r = parseQuery('not(scores[=ge=10&=le=20])');
+		const em = r.filter!.terms[0] as ElementMatch;
+		assert.ok('some' in em);
+		assert.deepEqual(em.path, ['scores']);
+		assert.equal(em.negated, true);
+		assert.equal(em.some.operator, 'and');
+		assert.equal(em.some.terms.length, 2);
+	});
+
+	it('not(not(a=1)) → plain eq — double negation cancels', () => {
+		const r = parseQuery('not(not(a=1))');
+		const c = r.filter!.terms[0] as Condition;
+		assert.ok(!c.negated);
+		assert.deepEqual(c.path, ['a']);
+		assert.equal(c.comparator, 'eq');
+	});
+
+	it('not() empty → QueryError', () => {
+		assert.throws(() => parseQuery('not()'), /not\(\) requires/);
+	});
+
+	it('not(a=1&b=2|c=3) → mixing error still applies inside', () => {
+		assert.throws(() => parseQuery('not(a=1&b=2|c=3)'), /mix/);
+	});
+
+	it('not(...) inside a group works', () => {
+		const r = parseQuery('(x=1&not(y=2))');
+		const grp = r.filter!.terms[0] as Group;
+		assert.equal(grp.operator, 'and');
+		assert.equal(grp.terms.length, 2);
+		const neg = grp.terms[1] as Condition;
+		assert.deepEqual(neg.path, ['y']);
+		assert.equal(neg.negated, true);
+	});
+
+	it('not(a=1&b=2) → De Morgan: or[negated(a,eq,1), negated(b,eq,2)]', () => {
+		const r = parseQuery('not(a=1&b=2)');
+		const grp = r.filter!.terms[0] as Group;
+		assert.equal(grp.operator, 'or');
+		assert.equal(grp.terms.length, 2);
+		assert.equal((grp.terms[0] as Condition).negated, true);
+		assert.equal((grp.terms[1] as Condition).negated, true);
 	});
 });

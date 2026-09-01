@@ -119,13 +119,35 @@ function accToGroup(acc: Acc): Group | undefined {
 	return { operator: acc.operator ?? 'and', terms: acc.terms };
 }
 
-// §6 invariant: an ElementMatch scoping exactly one plain non-negated named-path condition
-// normalizes to an ordinary Condition on the concatenated path. Negated inner conditions
-// are never flattened (∃¬ ≠ ¬∃, §5.1.1 / §5.3). Elem-conds (ic.path=[]) are never
-// flattened — merging would drop the existential quantifier.
+// §5.4 De Morgan desugaring for not(...). Recursively toggles negated flags inward.
+function negateTerm(term: Term): Term {
+	if ('terms' in term) return negateGroup(term as Group);
+	if ('some' in term) {
+		const em = term as ElementMatch;
+		const r: ElementMatch = { path: em.path, some: em.some };
+		if (!em.negated) r.negated = true;
+		return r;
+	}
+	const c = term as Condition;
+	const r: Condition = { path: c.path, comparator: c.comparator, value: c.value };
+	if (!c.negated) r.negated = true;
+	return r;
+}
+
+function negateGroup(grp: Group): Term {
+	// Single-term group: collapse to the negated leaf directly.
+	if (grp.terms.length === 1) return negateTerm(grp.terms[0]);
+	const op: 'and' | 'or' = grp.operator === 'and' ? 'or' : 'and';
+	return { operator: op, terms: grp.terms.map(negateTerm) };
+}
+
+// §6 invariant: an ElementMatch scoping exactly one plain non-negated Condition normalizes
+// to an ordinary Condition on the concatenated path (§5.3). Plain Conditions on list paths
+// are already existential (§5.5), so elem-cond path=[] also flattens safely:
+// [...em.path, ...[]] = em.path. Negated inner conditions are never flattened (∃¬ ≠ ¬∃).
 function pushElementMatch(acc: Acc, em: ElementMatch): void {
 	const t = em.some.terms;
-	if (t.length === 1 && !('some' in t[0]) && !('terms' in t[0]) && !em.negated && !(t[0] as Condition).negated && (t[0] as Condition).path.length > 0) {
+	if (t.length === 1 && !('some' in t[0]) && !('terms' in t[0]) && !em.negated && !(t[0] as Condition).negated) {
 		const ic = t[0] as Condition;
 		const merged: Condition = { path: [...em.path, ...ic.path], comparator: ic.comparator, value: ic.value };
 		acc.terms.push(merged);
@@ -296,6 +318,18 @@ export function parseQuery(search: string, options?: ParseOptions): ParseResult 
 					recordError("unexpected ','");
 					break;
 				case '(': {
+					if (val === 'not') {
+						// §5.4 not(...) term-form — not a call function.
+						qp.lastIndex = pos;
+						const inner = parseCondGroup(')');
+						pos = qp.lastIndex;
+						const grp = accToGroup(inner);
+						if (!grp) { recordError('not() requires a non-empty body'); break; }
+						closeEM();
+						acc.terms.push(negateGroup(grp));
+						acc.lastPath = undefined;
+						break;
+					}
 					if (val) { recordError(`unexpected call '${val}(' inside condition group`); break; }
 					qp.lastIndex = pos;
 					const inner = parseCondGroup(')');
@@ -314,7 +348,7 @@ export function parseQuery(search: string, options?: ParseOptions): ParseResult 
 						const innerGrp = accToGroup(inner);
 						if (!innerGrp) {
 							recordError(`empty bracket group for '${val}'`);
-						} else if (innerGrp.terms.length === 1 && !('some' in innerGrp.terms[0]) && !('terms' in innerGrp.terms[0]) && !(innerGrp.terms[0] as Condition).negated && (innerGrp.terms[0] as Condition).path.length > 0) {
+						} else if (innerGrp.terms.length === 1 && !('some' in innerGrp.terms[0]) && !('terms' in innerGrp.terms[0]) && !(innerGrp.terms[0] as Condition).negated) {
 							const ic = innerGrp.terms[0] as Condition;
 							const merged: Condition = { path: [...ePath, ...ic.path], comparator: ic.comparator, value: ic.value };
 							closeEM(); acc.terms.push(merged); acc.lastPath = merged.path;
@@ -654,6 +688,22 @@ export function parseQuery(search: string, options?: ParseOptions): ParseResult 
 				recordError("unexpected ','");
 				break;
 			case '(': {
+				if (val === 'not') {
+					// §5.4 not(...) term-form — not a call function (§5.6).
+					qp.lastIndex = pos;
+					const inner = parseCondGroup(')');
+					pos = qp.lastIndex;
+					const grp = accToGroup(inner);
+					if (!grp) { recordError('not() requires a non-empty body'); }
+					else {
+						closeActiveEM();
+						topAcc.terms.push(negateGroup(grp));
+						topAcc.lastPath = undefined;
+					}
+					if (search[pos] === ',') pos++;
+					path = undefined; chainPath = undefined;
+					break;
+				}
 				if (val) {
 					if (seenCalls.has(val)) {
 						// Consume args and record duplicate error.
@@ -717,7 +767,7 @@ export function parseQuery(search: string, options?: ParseOptions): ParseResult 
 					const innerGrp = accToGroup(inner);
 					if (!innerGrp) {
 						recordError(`empty bracket group for '${val}'`);
-					} else if (innerGrp.terms.length === 1 && !('some' in innerGrp.terms[0]) && !('terms' in innerGrp.terms[0]) && !(innerGrp.terms[0] as Condition).negated && (innerGrp.terms[0] as Condition).path.length > 0) {
+					} else if (innerGrp.terms.length === 1 && !('some' in innerGrp.terms[0]) && !('terms' in innerGrp.terms[0]) && !(innerGrp.terms[0] as Condition).negated) {
 						const ic = innerGrp.terms[0] as Condition;
 						const merged: Condition = { path: [...ePath, ...ic.path], comparator: ic.comparator, value: ic.value };
 						closeActiveEM(); topAcc.terms.push(merged); topAcc.lastPath = merged.path;
