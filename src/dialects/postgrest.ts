@@ -324,7 +324,7 @@ function parseLogicLeaf(raw: string, budget: ParseBudget): Term {
 		const operatorMatch = LOGIC_OPERATOR_PATTERN.exec(expression);
 		if (operatorMatch && OPERATOR_NAMES.has(operatorMatch[1])) {
 			const previousIndex = candidate > 0 ? candidateIndexes[candidate - 1] : -1;
-			if (raw.slice(previousIndex + 1, index) === 'not') {
+			if (previousIndex >= 0 && raw.slice(previousIndex + 1, index) === 'not') {
 				return parseFilterValue(
 					splitColumnPath(raw.slice(0, previousIndex)), raw.slice(previousIndex + 1), budget,
 				);
@@ -336,7 +336,7 @@ function parseLogicLeaf(raw: string, budget: ParseBudget): Term {
 }
 
 function parseLogicTerm(raw: string, depth: number, budget: ParseBudget): Term {
-	const value = raw;
+	const value = raw.trimStart();
 	const call = LOGIC_CALL_PATTERN.exec(value);
 	if (!call) return parseLogicLeaf(value, budget);
 	if (!value.endsWith(')')) syntaxViolation('unbalanced logic group');

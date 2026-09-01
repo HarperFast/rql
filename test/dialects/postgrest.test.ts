@@ -411,6 +411,20 @@ describe('PostgREST input and shared-model behavior', () => {
 		);
 	});
 
+	it('ignores leading separator whitespace in logic terms', () => {
+		assert.deepEqual(
+			parsePostgrest('or=(a.eq.1,%20and(b.eq.2,c.eq.3))'),
+			grouped('or', cond(['a'], 'eq', 1), group('and', cond(['b'], 'eq', 2), cond(['c'], 'eq', 3))),
+		);
+	});
+
+	it('does not interpret a first-segment not column as operator negation', () => {
+		assert.deepEqual(
+			parsePostgrest('or=(not.eq.ab,b.eq.2)'),
+			grouped('or', cond(['not'], 'eq', 'ab'), cond(['b'], 'eq', 2)),
+		);
+	});
+
 	it('allows an unquoted operand to end in a quote character', () => {
 		assert.deepEqual(
 			parsePostgrest('title=eq.The+%22Best%22'),
