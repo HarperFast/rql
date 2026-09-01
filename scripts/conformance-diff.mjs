@@ -52,19 +52,27 @@ const option = (name, fallback) => {
 	return index === -1 ? fallback : argv[index + 1];
 };
 
+const fail = (message, code = 2) => {
+	console.error(message);
+	process.exit(code);
+};
+
+/** A numeric flag that is silently NaN would record a whole fixture of spurious timeouts. */
+const positiveIntOption = (name, fallback) => {
+	const raw = option(name, String(fallback));
+	const value = Number(raw);
+	if (!Number.isInteger(value) || value < 1) fail(`--${name} must be a positive integer; got ${JSON.stringify(raw)}`);
+	return value;
+};
+
 const options = {
 	record: has('record'),
 	check: has('check'),
 	out: resolve(option('out', DEFAULT_REPORT)),
-	timeout: Number(option('timeout', '5000')),
-	startupTimeout: Number(option('startup-timeout', '60000')),
-	concurrency: Math.max(1, Number(option('concurrency', '4'))),
+	timeout: positiveIntOption('timeout', 5000),
+	startupTimeout: positiveIntOption('startup-timeout', 60000),
+	concurrency: positiveIntOption('concurrency', 4),
 	json: option('json', undefined),
-};
-
-const fail = (message, code = 2) => {
-	console.error(message);
-	process.exit(code);
 };
 
 const git = (cwd, args) => {
@@ -185,17 +193,36 @@ async function record() {
 
 class ReferenceRunner {
 	#child;
-	#pending;
+	#pending = new Map();
 	#nextId = 0;
+	/** Set once the worker cannot be replaced; every later parse fails fast instead of hanging. */
+	#dead;
+
+	/**
+	 * Settle every in-flight parse with a harness error. A reference outcome the harness could
+	 * not observe must never look like agreement, so it flows on to the classifier, finds no
+	 * rule, and fails the run with the query named.
+	 */
+	#failPending(reason) {
+		const pending = this.#pending;
+		this.#pending = new Map();
+		for (const entry of pending.values()) {
+			clearTimeout(entry.timer);
+			const outcome = { status: 'harness-error', error: reason };
+			entry.resolve({ strict: outcome, deferred: outcome });
+		}
+	}
 
 	async #spawn() {
-		this.#child = fork(join(scriptDir, 'conformance-ref-worker.mjs'), [], {
+		const child = fork(join(scriptDir, 'conformance-ref-worker.mjs'), [], {
 			stdio: ['ignore', 'ignore', 'inherit', 'ipc'],
 		});
+		this.#child = child;
 		// Requests are issued one at a time by the replay loop, so replacing the pending map on
 		// a restart cannot strand a second in-flight parse.
 		this.#pending = new Map();
-		this.#child.on('message', (message) => {
+
+		child.on('message', (message) => {
 			if (message?.type !== 'result') return;
 			const entry = this.#pending.get(message.id);
 			if (!entry) return;
@@ -203,29 +230,54 @@ class ReferenceRunner {
 			clearTimeout(entry.timer);
 			entry.resolve({ strict: message.strict, deferred: message.deferred });
 		});
+		// Without these, a worker that dies mid-parse (uncaught throw, OOM kill) leaves its
+		// promise unsettled and the whole run hangs instead of failing.
+		const onGone = (reason) => {
+			if (this.#child !== child) return;
+			this.#dead ??= reason;
+			this.#failPending(reason);
+		};
+		child.on('exit', (code, signal) => onGone(`the reference worker exited (code ${code}, signal ${signal})`));
+		child.on('error', (error) => onGone(`the reference worker failed to run: ${error.message}`));
+
 		await new Promise((ready, reject) => {
-			this.#child.once('message', (message) => (message?.type === 'ready' ? ready() : reject(new Error('worker did not start'))));
-			this.#child.once('error', reject);
+			const timer = setTimeout(() => reject(new Error(`the reference worker did not start within ${options.startupTimeout}ms`)), options.startupTimeout);
+			const settle = (fn, value) => {
+				clearTimeout(timer);
+				fn(value);
+			};
+			child.once('message', (message) =>
+				message?.type === 'ready' ? settle(ready) : settle(reject, new Error('the reference worker sent no ready message'))
+			);
+			child.once('error', (error) => settle(reject, error));
+			child.once('exit', (code, signal) => settle(reject, new Error(`the reference worker exited before starting (code ${code}, signal ${signal})`)));
 		});
+		this.#dead = undefined;
 	}
 
 	async start() {
 		await this.#spawn();
 	}
 
-	/** One parse. On a timeout the worker is killed and replaced, so one wedged case
-	 * costs exactly that case rather than the rest of the corpus. */
+	/**
+	 * One parse. On a timeout the worker is killed and replaced, so one wedged case costs
+	 * exactly that case rather than the rest of the corpus. A replacement that will not start
+	 * ends the run's reference coverage rather than hanging it.
+	 */
 	parse(query) {
+		if (this.#dead) return Promise.resolve({ strict: { status: 'harness-error', error: this.#dead }, deferred: { status: 'harness-error', error: this.#dead } });
 		const id = this.#nextId++;
 		return new Promise((resolveOutcome) => {
 			const timer = setTimeout(async () => {
 				this.#pending.delete(id);
+				const timedOut = { status: 'timeout', ms: options.timeout };
 				this.#child.kill('SIGKILL');
-				await this.#spawn();
-				resolveOutcome({
-					strict: { status: 'timeout', ms: options.timeout },
-					deferred: { status: 'timeout', ms: options.timeout },
-				});
+				try {
+					await this.#spawn();
+				} catch (error) {
+					this.#dead = `the reference worker could not be restarted: ${error.message}`;
+				}
+				resolveOutcome({ strict: timedOut, deferred: timedOut });
 			}, options.timeout);
 			this.#pending.set(id, { resolve: resolveOutcome, timer });
 			this.#child.send({ type: 'parse', id, query });
@@ -233,7 +285,7 @@ class ReferenceRunner {
 	}
 
 	stop() {
-		this.#child.kill();
+		this.#child?.kill();
 	}
 }
 

@@ -77,7 +77,14 @@ function decodedPath(attribute: unknown): string[] {
  */
 function rawPath(name: unknown): string[] {
 	if (typeof name !== 'string') throw new AdapterError(`unsupported raw path shape: ${String(name)}`);
-	return name.split('.').map((segment) => decodeURIComponent(segment));
+	return name.split('.').map((segment) => {
+		try {
+			return decodeURIComponent(segment);
+		} catch {
+			// A malformed escape Harper left in a raw name is an adapter gap, not a harness fault.
+			throw new AdapterError(`cannot percent-decode path segment ${JSON.stringify(segment)}`);
+		}
+	});
 }
 
 const isConditionShape = (term: Dict): boolean => 'comparator' in term || 'attribute' in term || 'value' in term;

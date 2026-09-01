@@ -102,6 +102,21 @@ export function stableStringify(value: Json, indent = 0): string {
 	return render(value, 0);
 }
 
+/**
+ * Short content fingerprint of a canonical value. The report prints truncated JSON for
+ * readability; the fingerprint is what makes the committed bytes change when a value changes
+ * past the truncation point, so `--check` cannot miss a regression it did not have room to show.
+ */
+export function digest(value: Json): string {
+	const text = stableStringify(value);
+	let hash = 0x811c9dc5;
+	for (let index = 0; index < text.length; index++) {
+		hash ^= text.charCodeAt(index);
+		hash = Math.imul(hash, 0x01000193) >>> 0;
+	}
+	return hash.toString(16).padStart(8, '0');
+}
+
 export type Difference = {
 	/** JSON-pointer-ish location, e.g. `/filter/terms/0/value`. */
 	at: string;
