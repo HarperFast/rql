@@ -1,395 +1,606 @@
-import { Query } from './query.ts';
 import { QueryError, SyntaxViolation } from './errors.ts';
-import {
-	SYMBOL_OPERATORS,
-	COERCIBLE_OPERATORS,
-	ALTERNATE_COMPARATOR_NAMES,
-	LIST_VALUE_COMPARATORS,
-	resolveComparator,
-} from './comparators.ts';
+import { SYMBOL_OPS, LIST_COMPARATORS, resolveFiqlName } from './comparators.ts';
+import type {
+	ParseResult, ParseOptions, Group, Condition, SortKey, Projection, Field, Value,
+} from './types.ts';
 
-const NEEDS_PARSER = /[()[\]|!<>.]|(=\w*=)/;
-const FIQL_OPERATOR_NAME = /^[a-zA-Z_][a-zA-Z_0-9]*$/;
+const FIQL_NAME = /^[a-zA-Z_][a-zA-Z_0-9]*$/;
+
+// Regexes are created fresh per parseQuery call for reentrancy.
+// QP: tokenises attribute names and structural operators.
+// VP: tokenises value tokens (includes ( ) , as plain chars).
+const QP_SRC = '([^?&|=<>!([{\\}\\]),]*)([([{\\}\\])|,&]|[=<>!]*)';
+const VP_SRC = '([^&|=\\[\\]{}]*)([\\[\\]{}]|[&|=]*)';
+
+// ── Value decoding ─────────────────────────────────────────────────────────
+
+function interpretValue(token: string): Value {
+	if (token === 'null') return null;
+	if (token === 'true') return true;
+	if (token === 'false') return false;
+	const colon = token.indexOf(':');
+	if (colon > 0) {
+		const type = token.slice(0, colon);
+		const rest = token.slice(colon + 1);
+		switch (type) {
+			case 'number':  return rest[0] === '$' ? parseInt(rest.slice(1), 36) : +rest;
+			case 'boolean': return rest === 'true';
+			case 'date':    return new Date(isNaN(+rest) ? decodeURIComponent(rest) : +rest);
+			case 'string':  return decodeURIComponent(rest);
+			default: throw new QueryError(`Unknown type prefix '${type}'`);
+		}
+	}
+	return decodeURIComponent(token);
+}
+
+const verbatimValue = (token: string): Value => decodeURIComponent(token);
 
 /**
- * Parse a query string into a Query object.
- *
- * @param search - The raw query string (no leading `?`).
- * @param target - Optional existing Query to mutate. When provided, semantic errors accumulate
- *   into `target.parseError` instead of throwing. When omitted a fresh Query is returned and
- *   errors throw.
+ * Split a raw path token on literal `.`, decode each segment.
+ * `%2E` → literal `.` inside a segment (§4.2).
  */
-export function parseQuery(search: string, target?: Query): Query {
-	if (!search) return target ?? new Query();
+function splitPath(raw: string): string[] {
+	return raw.split('.').map(decodeURIComponent);
+}
 
-	if (!NEEDS_PARSER.test(search)) {
-		// Fast path: no special operators — return URLSearchParams-backed Query.
-		if (target) return target;
-		return new Query(search);
+function makeCondition(
+	path: string[], comparator: string, negated: boolean, raw: string, verbatim: boolean
+): Condition {
+	// Trailing * on == (eq, interpreted) → starts_with.
+	if (comparator === 'eq' && !verbatim && raw.indexOf('*') > -1) {
+		if (!raw.endsWith('*')) throw new QueryError('wildcard can only be used at the end of a string');
+		const c: Condition = { path, comparator: 'starts_with', value: decodeURIComponent(raw.slice(0, -1)) };
+		if (negated) c.negated = true;
+		return c;
 	}
+	const value = (verbatim ? verbatimValue : interpretValue)(raw);
+	const c: Condition = { path, comparator, value };
+	if (negated) c.negated = true;
+	return c;
+}
 
-	// Parsed path: fresh regex instances per call for reentrancy.
-	const queryParser = /([^?&|=<>!([{}\]),]*)([([{}\])|,&]|[=<>!]*)/g;
-	const valueParser = /([^&|=[\]{}]+)([[\]{}]|[&|=]*)/g;
+function parseListRaw(raw: string, verbatim: boolean): Value[] {
+	// Expects `(v1,v2,...)` format. Each element decoded individually.
+	const inner = raw.slice(1, -1);
+	if (inner.length === 0) return [];
+	const decode = verbatim ? verbatimValue : interpretValue;
+	return inner.split(',').map(decode);
+}
 
-	let lastIndex = 0;
-	let parseErrorMessage: string | undefined;
+function betweenGroup(path: string[], raw: string, betweenNegated: boolean): Group {
+	// `(lo,hi)` → and-Group of ge(lo) + le(hi), or or-Group when negated.
+	if (raw.length < 2 || raw.charCodeAt(0) !== 0x28 || raw.charCodeAt(raw.length - 1) !== 0x29)
+		throw new SyntaxViolation('between requires value list (lo,hi)');
+	const parts = raw.slice(1, -1).split(',');
+	if (parts.length !== 2) throw new SyntaxViolation('between requires exactly two values');
+	const lo = interpretValue(parts[0]);
+	const hi = interpretValue(parts[1]);
+	const ge: Condition = { path, comparator: 'ge', value: lo };
+	const le: Condition = { path, comparator: 'le', value: hi };
+	if (betweenNegated) { ge.negated = true; le.negated = true; }
+	return { operator: betweenNegated ? 'or' : 'and', terms: [ge, le] };
+}
+
+// ── Group accumulator ──────────────────────────────────────────────────────
+
+type Term = Condition | Group;
+
+type Acc = {
+	terms: Term[];
+	operator?: 'and' | 'or';
+	lastPath?: string[];
+	chainGroup?: { operator: 'and' | 'or'; terms: Term[] };
+};
+
+function newAcc(): Acc { return { terms: [] }; }
+
+function setGroupOp(acc: Acc, op: 'and' | 'or', recordError: (msg: string) => void): void {
+	if (acc.terms.length === 0 && !acc.chainGroup) return;
+	if (acc.operator && acc.operator !== op)
+		recordError('Cannot mix & and | in one group; use (...) or [...]');
+	else acc.operator = op;
+}
+
+function closeChain(acc: Acc): void {
+	if (acc.chainGroup) {
+		acc.terms.push(acc.chainGroup as Group);
+		acc.chainGroup = undefined;
+	}
+}
+
+function pushTerm(acc: Acc, term: Term, chainOp: 'and' | 'or' | undefined, recordError: (msg: string) => void): void {
+	if (chainOp) {
+		if (!acc.chainGroup) {
+			const prev = acc.terms.pop();
+			if (prev === undefined) { recordError('no preceding condition to chain onto'); return; }
+			acc.chainGroup = { operator: chainOp, terms: [prev] };
+		}
+		acc.chainGroup.terms.push(term);
+	} else {
+		closeChain(acc);
+		acc.terms.push(term);
+	}
+}
+
+function accToGroup(acc: Acc): Group | undefined {
+	closeChain(acc);
+	if (acc.terms.length === 0) return undefined;
+	return { operator: acc.operator ?? 'and', terms: acc.terms };
+}
+
+// ── Main parse function ────────────────────────────────────────────────────
+
+export function parseQuery(search: string, options?: ParseOptions): ParseResult {
+	const deferErrors = options?.deferErrors ?? false;
+	if (!search) return {};
+
+	const qp = new RegExp(QP_SRC, 'g');
+	const vp = new RegExp(VP_SRC, 'g');
+	let pos = 0;
+	let errorMsg: string | undefined;
 
 	function recordError(msg: string): void {
-		const em = `${msg} at position ${lastIndex}`;
-		parseErrorMessage = parseErrorMessage ? parseErrorMessage + ', ' + em : em;
+		const em = `${msg} at position ${pos}`;
+		errorMsg = errorMsg ? `${errorMsg}, ${em}` : em;
 	}
 
-	function decodeProperty(name: string): string | string[] {
-		if (name.indexOf('.') > -1) return name.split('.').map((p) => decodeURIComponent(p));
-		return decodeURIComponent(name);
-	}
+	// ── Condition-group parser ───────────────────────────────────────────────
+	// Uses QP throughout (no VP switching inside groups — VP is for top-level).
+	// Call functions are not dispatched here; they're top-level only.
 
-	function typedDecoding(value: string): unknown {
-		if (value === 'null') return null;
-		if (value.indexOf(':') > -1) {
-			const colonIdx = value.indexOf(':');
-			const type = value.slice(0, colonIdx);
-			const rest = value.slice(colonIdx + 1);
-			if (type === 'number') {
-				if (rest[0] === '$') return parseInt(rest.slice(1), 36);
-				return +rest;
-			}
-			if (type === 'boolean') return rest === 'true';
-			if (type === 'date') return new Date(isNaN(+rest) ? decodeURIComponent(rest) : +rest);
-			if (type === 'string') return decodeURIComponent(rest);
-			throw new QueryError(`Unknown type ${type}`);
-		}
-		return decodeURIComponent(value);
-	}
+	function parseCondGroup(closeCh: string): Acc {
+		const acc = newAcc();
+		let path: string[] | undefined;
+		let rawComp: string | undefined;
+		let fiqlMode = false;
+		let verbatim = false;
+		let expectDelim = false;
+		let chainOp: 'and' | 'or' | undefined;
+		let chainPath: string[] | undefined; // path for &=/|= continuation
 
-	function wildcardDecoding(condition: any, rawValue: string): void {
-		if (rawValue.indexOf('*') > -1) {
-			if (rawValue.endsWith('*')) {
-				condition.comparator = 'starts_with';
-				condition.value = decodeURIComponent(rawValue.slice(0, -1));
+		function finishCond(rawVal: string): void {
+			if (path === undefined) return;
+			const rp = path;
+			const rc = rawComp ?? '=';
+			if (fiqlMode) {
+				const r = resolveFiqlName(rc);
+				if (r.isBetween) {
+					pushTerm(acc, betweenGroup(rp, rawVal, r.betweenNegated ?? false), chainOp, recordError);
+				} else {
+					const isListComp = LIST_COMPARATORS.has(r.comparator) || LIST_COMPARATORS.has(`not_${r.comparator}`);
+					let value: Value;
+					if (isListComp && rawVal.charCodeAt(0) === 0x28) {
+						value = parseListRaw(rawVal, r.verbatim);
+					} else {
+						value = (r.verbatim ? verbatimValue : interpretValue)(rawVal);
+					}
+					const c: Condition = { path: rp, comparator: r.comparator, value };
+					if (r.negated) c.negated = true;
+					pushTerm(acc, c, chainOp, recordError);
+				}
 			} else {
-				throw new QueryError('wildcard can only be used at the end of a string');
+				const sym = SYMBOL_OPS[rc];
+				if (!sym) { recordError(`unknown operator '${rc}'`); }
+				else { pushTerm(acc, makeCondition(rp, sym.comparator, sym.negated, rawVal, sym.verbatim), chainOp, recordError); }
 			}
+			if (!chainOp) acc.lastPath = rp;
+			path = undefined; rawComp = undefined; fiqlMode = false; verbatim = false; chainOp = undefined; chainPath = undefined;
 		}
-	}
 
-	function buildCondition(
-		attribute: any,
-		rawComparator: string | undefined,
-		rawValue: string,
-		valueDecoder: (s: string) => unknown
-	): any {
-		const { comparator: resolvedComparator, negated } = resolveComparator(rawComparator);
-		let value: unknown;
-		if (
-			LIST_VALUE_COMPARATORS.has(resolvedComparator as string) &&
-			rawValue.length >= 2 &&
-			rawValue.charCodeAt(0) === 0x28 /* ( */ &&
-			rawValue.charCodeAt(rawValue.length - 1) === 0x29 /* ) */
-		) {
-			const inner = rawValue.slice(1, -1);
-			value = inner.length === 0 ? [] : inner.split(',').map(valueDecoder);
-		} else {
-			value = valueDecoder(rawValue);
-		}
-		const condition: any = { comparator: resolvedComparator, attribute: attribute || null, value };
-		if (negated) condition.negated = true;
-		if (rawComparator === 'eq') wildcardDecoding(condition, rawValue);
-		return condition;
-	}
-
-	function toSortEntry(sort: any): any {
-		if (Array.isArray(sort)) {
-			const sortObject = toSortEntry(sort[0]);
-			sort[0] = sortObject.attribute;
-			sortObject.attribute = sort;
-			return sortObject;
-		}
-		if (typeof sort === 'string') {
-			switch (sort[0]) {
-				case '-': return { attribute: sort.slice(1), descending: true };
-				case '+': return { attribute: sort.slice(1), descending: false };
-				default: return { attribute: sort, descending: false };
-			}
-		}
-		recordError(`Unknown sort type ${sort}`);
-	}
-
-	function toSortObject(sort: any[]): any {
-		const sortObject = toSortEntry(sort[0]);
-		if (sort.length > 1) sortObject.next = toSortObject(sort.slice(1));
-		return sortObject;
-	}
-
-	function assignOperator(query: any, lastBinaryOperator: string | undefined): void {
-		if (query.conditions.length > 0) {
-			if (query.operator) {
-				if (query.operator !== lastBinaryOperator)
-					recordError('Can not mix operators within a condition grouping');
-			} else {
-				query.operator = lastBinaryOperator;
-			}
-		}
-	}
-
-	function parseBlock(query: any, expectedEnd: string): any {
-		// Ensure Query instances have conditions ready for the parsed path.
-		// Inner groups are created with new Query() whose conditions start undefined.
-		if (query instanceof Query && query.conditions === undefined) query.conditions = [];
-
-		let parser = queryParser;
+		qp.lastIndex = pos;
 		let match: RegExpExecArray | null;
-		let attribute: any;
-		let comparator: string | undefined;
-		let expectingDelimiter: boolean | undefined;
-		let expectingValue: boolean | undefined;
-		let valueDecoder: (s: string) => unknown = decodeURIComponent;
-		let lastBinaryOperator: string | undefined;
+		while ((match = qp.exec(search))) {
+			pos = qp.lastIndex;
+			const [, val, op] = match;
 
-		while ((match = parser.exec(search))) {
-			lastIndex = parser.lastIndex;
-			const [, value, operator] = match;
-
-			if (expectingDelimiter) {
-				if (value) recordError(`expected operator, but encountered '${value}'`);
-				expectingDelimiter = false;
-				expectingValue = false;
-			} else {
-				expectingValue = true;
+			if (expectDelim) {
+				if (val) recordError(`expected operator, got '${val}'`);
+				expectDelim = false;
 			}
 
-			let entry: any;
-			switch (operator) {
+			switch (op) {
 				case '=':
-					if (attribute != undefined) {
-						if (FIQL_OPERATOR_NAME.test(value)) comparator = value;
-						else recordError(`invalid FIQL operator ${value}`);
-						valueDecoder = typedDecoding;
+					if (path !== undefined) {
+						// Second '=' of FIQL: path=name=value.
+						if (!FIQL_NAME.test(val)) { recordError(`invalid FIQL name '${val}'`); break; }
+						rawComp = val; fiqlMode = true;
+					} else if (chainPath) {
+						// &= chain: already have path, this is the FIQL name.
+						if (!FIQL_NAME.test(val)) { recordError(`invalid FIQL name '${val}'`); break; }
+						path = chainPath; rawComp = val; fiqlMode = true;
 					} else {
-						valueDecoder = decodeURIComponent;
-						comparator = 'equals';
-						if (!value) recordError(`attribute must be specified before equality comparator`);
-						attribute = decodeProperty(value);
+						if (!val) { recordError('path required before ='); break; }
+						path = splitPath(val); rawComp = '='; verbatim = true;
 					}
 					break;
-				case '==':
-				case '!=':
-				case '<':
-				case '<=':
-				case '>':
-				case '>=':
-				case '===':
-				case '!==':
-					comparator = SYMBOL_OPERATORS[operator];
-					valueDecoder = COERCIBLE_OPERATORS[comparator] ? typedDecoding : decodeURIComponent;
-					if (!value) recordError(`attribute must be specified before comparator ${operator}`);
-					attribute = decodeProperty(value);
-					break;
-				case '&=':
-				case '|=':
-				case '|':
-				case '&':
-				case '':
-				case undefined:
-					if (attribute == null) {
-						if (attribute === undefined) {
-							if (expectedEnd)
-								recordError(
-									`expected '${expectedEnd}', but encountered ${operator?.[0] ? "'" + operator[0] + "'" : 'end of string'}`
-								);
-							recordError(`no comparison specified before ${operator ? "'" + operator + "'" : 'end of string'}`);
-						}
+				case '==': case '===': case '!=': case '!==': case '<': case '<=': case '>': case '>=':
+					if (chainPath) {
+						path = chainPath; rawComp = op;
 					} else {
-						if (!query.conditions) recordError('conditions/comparisons are not allowed in a property list');
-						const condition = buildCondition(attribute, comparator, value, valueDecoder);
-						if (attribute === '') {
-							const lastCondition = query.conditions[query.conditions.length - 1];
-							lastCondition.chainedConditions = lastCondition.chainedConditions || [];
-							lastCondition.chainedConditions.push(condition);
-							lastCondition.operator = lastBinaryOperator;
-						} else {
-							assignOperator(query, lastBinaryOperator);
-							query.conditions.push(condition);
-						}
+						if (!val) { recordError(`path required before ${op}`); break; }
+						path = splitPath(val); rawComp = op;
 					}
-					if (operator === '&') {
-						lastBinaryOperator = 'and';
-						attribute = undefined;
-					} else if (operator === '|') {
-						lastBinaryOperator = 'or';
-						attribute = undefined;
-					} else if (operator === '&=') {
-						lastBinaryOperator = 'and';
-						attribute = '';
-					} else if (operator === '|=') {
-						lastBinaryOperator = 'or';
-						attribute = '';
-					}
+					fiqlMode = false;
 					break;
-				case ',':
-					if (query.conditions) {
-						recordError('conditions/comparisons are not allowed in a property list');
-					} else {
-						query.push(decodeProperty(value));
-					}
-					attribute = undefined;
-					break;
-				case '(': {
-					queryParser.lastIndex = lastIndex;
-					const args: any = parseBlock(value ? [] : new Query(), ')');
-					switch (value) {
-						case '':
-							assignOperator(query, lastBinaryOperator);
-							query.conditions.push(args);
-							break;
-						case 'limit':
-							switch (args.length) {
-								case 1:
-									query.limit = +args[0];
-									break;
-								case 2:
-									query.offset = +args[0];
-									query.limit = args[1] - query.offset;
-									break;
-								default:
-									recordError('limit must have 1 or 2 arguments');
-							}
-							break;
-						case 'select':
-							if (Array.isArray(args[0]) && args.length === 1 && !args[0].name) {
-								query.select = args[0];
-								query.select.asArray = true;
-							} else if (args.length === 1) {
-								query.select = args[0];
-							} else if (args.length === 2 && args[1] === '') {
-								query.select = args.slice(0, 1);
-							} else {
-								query.select = args;
-							}
-							break;
-						case 'group-by':
-							recordError('group by is not implemented yet');
-							break; // fix: original falls through into sort
-						case 'sort':
-							query.sort = toSortObject(args);
-							break;
-						default:
-							recordError(`unknown query function call ${value}`);
-					}
-					if (search[lastIndex] === ',') {
-						parser.lastIndex = ++lastIndex;
-					} else {
-						expectingDelimiter = true;
-					}
-					attribute = null;
+				case '&': case '|': {
+					const lop: 'and' | 'or' = op === '&' ? 'and' : 'or';
+					if (path !== undefined) finishCond(val);
+					closeChain(acc);
+					setGroupOp(acc, lop, recordError);
 					break;
 				}
-				case '{':
-					if (query.conditions) recordError('property sets are not allowed in a queries');
-					if (!value) recordError('property sets must have a defined parent property name');
-					queryParser.lastIndex = lastIndex;
-					entry = parseBlock([], '}');
-					entry.name = value;
-					query.push(entry);
-					if (search[lastIndex] === ',') {
-						parser.lastIndex = ++lastIndex;
-					} else {
-						expectingDelimiter = true;
-					}
+				case '&=': case '|=': {
+					if (path !== undefined) finishCond(val);
+					chainOp = op === '&=' ? 'and' : 'or';
+					chainPath = acc.lastPath ?? (acc.chainGroup?.terms.at(-1) as Condition | undefined)?.path;
+					if (!chainPath) recordError('no preceding condition for &=/|=');
 					break;
-				case '[':
-					queryParser.lastIndex = lastIndex;
-					if (value) {
-						entry = parseBlock(new Query(), ']');
-						entry.name = value;
-					} else {
-						entry = parseBlock(query.conditions ? new Query() : [], ']');
-					}
-					if (query.conditions) {
-						assignOperator(query, lastBinaryOperator);
-						if (search[lastIndex] === '=') {
-							valueDecoder = decodeURIComponent;
-							comparator = 'equals';
-							attribute = decodeProperty(value);
-							parser.lastIndex = ++lastIndex;
-							break;
-						} else {
-							query.conditions.push(entry);
-							attribute = null;
-						}
-					} else {
-						query.push(entry);
-					}
-					if (search[lastIndex] === ',') {
-						parser.lastIndex = ++lastIndex;
-					} else {
-						expectingDelimiter = true;
-					}
+				}
+				case '': case undefined:
+					if (path !== undefined) finishCond(val);
 					break;
-				case ')':
-				case ']':
-				case '}':
-					if (expectedEnd === operator[0]) {
-						if (query.conditions) {
-							if (attribute) {
-								const condition = buildCondition(attribute, comparator || 'equals', value, valueDecoder);
-								assignOperator(query, lastBinaryOperator);
-								query.conditions.push(condition);
-							} else if (value) {
-								recordError('no attribute or comparison specified');
-							}
-						} else if (value || (query.length > 0 && expectingValue)) {
-							query.push(decodeProperty(value));
-						}
-						return query;
-					} else if (expectedEnd) {
-						recordError(`expected '${expectedEnd}', but encountered '${operator[0]}'`);
-					} else {
-						recordError(`unexpected token '${operator[0]}'`);
-					}
+				case ',':
+					recordError("unexpected ','");
 					break;
+				case '(': {
+					// Nested condition group.
+					if (val) { recordError(`unexpected name '${val}' before '('`); break; }
+					qp.lastIndex = pos;
+					const inner = parseCondGroup(')');
+					pos = qp.lastIndex;
+					const grp = accToGroup(inner);
+					if (grp) { closeChain(acc); acc.terms.push(grp); acc.lastPath = undefined; }
+					if (search[pos] === ',') { qp.lastIndex = ++pos; } else expectDelim = true;
+					path = undefined; chainPath = undefined;
+					break;
+				}
+				case '[': {
+					if (val) { recordError(`unexpected name '${val}' before '['`); break; }
+					qp.lastIndex = pos;
+					const inner = parseCondGroup(']');
+					pos = qp.lastIndex;
+					const grp = accToGroup(inner);
+					if (grp) { closeChain(acc); acc.terms.push(grp); acc.lastPath = undefined; }
+					if (search[pos] === ',') { qp.lastIndex = ++pos; } else expectDelim = true;
+					path = undefined; chainPath = undefined;
+					break;
+				}
+				case ')': case ']': case '}': {
+					const ch = op[0];
+					if (closeCh === ch) {
+						if (path !== undefined) finishCond(val);
+						else if (val) recordError('unexpected value without path');
+						return acc;
+					}
+					recordError(closeCh ? `expected '${closeCh}', got '${ch}'` : `unexpected '${ch}'`);
+					break;
+				}
 				default:
-					recordError(`unexpected operator '${operator}'`);
+					recordError(`unexpected token '${op}'`);
 			}
 
-			if (expectedEnd !== ')') {
-				parser = attribute ? valueParser : queryParser;
-				parser.lastIndex = lastIndex;
-			}
-			if (lastIndex === search.length) return query;
+			qp.lastIndex = pos;
+			if (pos === search.length) break;
 		}
-		if (expectedEnd) recordError(`expected '${expectedEnd}', but encountered end of string`);
-		return query;
+		if (closeCh) recordError(`expected '${closeCh}', got end of string`);
+		return acc;
 	}
 
-	const result = target ?? new Query();
-	result.conditions = [];
-	queryParser.lastIndex = 0;
+	// ── Top-level parser (condition group + call functions) ──────────────────
+	// Switches between QP and VP based on whether a comparator was just seen.
 
-	try {
-		parseBlock(result, '');
-		if (lastIndex !== search.length)
-			recordError(`Unable to parse query, unexpected end of query`);
-		if (parseErrorMessage) {
-			const err = new SyntaxViolation(parseErrorMessage);
-			if (target) {
-				target.parseError = err;
+	const result: ParseResult = {};
+	const topAcc = newAcc();
+
+	let path: string[] | undefined;
+	let rawComp: string | undefined;
+	let fiqlMode = false;
+	let verbatim = false;
+	let expectDelim = false;
+	let chainOp: 'and' | 'or' | undefined;
+	let chainPath: string[] | undefined;
+
+	function finishTopCond(rawVal: string): void {
+		if (path === undefined) return;
+		const rp = path;
+		const rc = rawComp ?? '=';
+		if (fiqlMode) {
+			const r = resolveFiqlName(rc);
+			if (r.isBetween) {
+				pushTerm(topAcc, betweenGroup(rp, rawVal, r.betweenNegated ?? false), chainOp, recordError);
 			} else {
-				throw err;
+				const isListComp = LIST_COMPARATORS.has(r.comparator) || LIST_COMPARATORS.has(`not_${r.comparator}`);
+				let value: Value;
+				if (isListComp && rawVal.charCodeAt(0) === 0x28) {
+					value = parseListRaw(rawVal, r.verbatim);
+				} else {
+					value = (r.verbatim ? verbatimValue : interpretValue)(rawVal);
+				}
+				const c: Condition = { path: rp, comparator: r.comparator, value };
+				if (r.negated) c.negated = true;
+				pushTerm(topAcc, c, chainOp, recordError);
 			}
+		} else {
+			const sym = SYMBOL_OPS[rc];
+			if (!sym) { recordError(`unknown operator '${rc}'`); }
+			else { pushTerm(topAcc, makeCondition(rp, sym.comparator, sym.negated, rawVal, sym.verbatim), chainOp, recordError); }
 		}
-		return result;
-	} catch (error: any) {
-		error.statusCode = 400;
-		if (!(error instanceof SyntaxViolation)) {
-			error.message = `Unable to parse query, ${error.message} at position ${lastIndex} in '${search}'`;
-			if (parseErrorMessage) error.message += ', ' + parseErrorMessage;
-		}
-		if (target) {
-			target.parseError = error;
-			return target;
-		}
-		throw error;
+		if (!chainOp) topAcc.lastPath = rp;
+		path = undefined; rawComp = undefined; fiqlMode = false; verbatim = false; chainOp = undefined; chainPath = undefined;
 	}
+
+	// Sub-parsers for call function arguments.
+	// Each creates its own regex but shares closure `pos`.
+
+	function parsePlainArgs(callName: string): string[] {
+		const args: string[] = [];
+		const p = new RegExp(QP_SRC, 'g');
+		p.lastIndex = pos;
+		let m: RegExpExecArray | null;
+		while ((m = p.exec(search))) {
+			pos = p.lastIndex;
+			const [, val, op] = m;
+			args.push(val);
+			if (op === ')') return args;
+			if (op === ',') continue;
+			if (pos === search.length) { recordError(`expected ')' for ${callName}`); return args; }
+		}
+		recordError(`expected ')' for ${callName}`);
+		return args;
+	}
+
+	function parseSortArgs(): SortKey[] {
+		const keys: SortKey[] = [];
+		const p = new RegExp(QP_SRC, 'g');
+		p.lastIndex = pos;
+		let m: RegExpExecArray | null;
+		while ((m = p.exec(search))) {
+			pos = p.lastIndex;
+			const [, val, op] = m;
+			if (val) {
+				let raw = val;
+				let direction: 'asc' | 'desc' = 'asc';
+				if (raw[0] === '+') raw = raw.slice(1);
+				else if (raw[0] === '-') { direction = 'desc'; raw = raw.slice(1); }
+				keys.push({ path: splitPath(raw), direction });
+			}
+			if (op === ')') return keys;
+			if (op === ',') continue;
+			if (pos === search.length) { recordError("expected ')' for sort"); return keys; }
+		}
+		recordError("expected ')' for sort");
+		return keys;
+	}
+
+	type RawField = { path: string[]; nested?: RawField[]; tuple?: boolean };
+
+	function parseSelectList(closeCh: string): RawField[] {
+		const fields: RawField[] = [];
+		const p = new RegExp(QP_SRC, 'g');
+		p.lastIndex = pos;
+		let m: RegExpExecArray | null;
+		while ((m = p.exec(search))) {
+			pos = p.lastIndex;
+			const [, val, op] = m;
+			if (op === closeCh || (op === '' && pos === search.length)) {
+				if (val) fields.push({ path: splitPath(val) });
+				if (op !== closeCh) recordError(`expected '${closeCh}' for select`);
+				return fields;
+			}
+			if (op === ')' || op === ']' || op === '}') {
+				if (op === closeCh) { if (val) fields.push({ path: splitPath(val) }); return fields; }
+				recordError(`expected '${closeCh}', got '${op}'`);
+				return fields;
+			}
+			if (op === ',') { if (val) fields.push({ path: splitPath(val) }); continue; }
+			if (op === '{') {
+				// `rel{x,y}` nested sub-select.
+				const nested = parseSelectList('}');
+				fields.push({ path: splitPath(val), nested });
+				continue;
+			}
+			if (op === '[') {
+				if (val) {
+					// `rel[select(x,y)]` — consume `select(`, then list, then `)]`.
+					const selectRe = /select\(/g;
+					selectRe.lastIndex = pos;
+					const sm = selectRe.exec(search);
+					if (sm && sm.index === pos) {
+						pos = selectRe.lastIndex;
+						const nested = parseSelectList(')');
+						if (search[pos] === ']') pos++;
+						fields.push({ path: splitPath(val), nested });
+					} else {
+						recordError(`expected 'select(' after '${val}['`);
+					}
+				} else {
+					// `[a,b]` tuple field.
+					const items = parseSelectList(']');
+					fields.push({ path: [], nested: items, tuple: true });
+				}
+				continue;
+			}
+			// Structural op like `=` — unexpected in select context.
+			if (val) fields.push({ path: splitPath(val) });
+		}
+		recordError(`expected '${closeCh}' for select`);
+		return fields;
+	}
+
+	function rawFieldsToProjection(fields: RawField[], trailingComma: boolean): Projection {
+		if (fields.length === 1 && fields[0].tuple) {
+			const f = fields[0];
+			return {
+				mode: 'tuples',
+				fields: (f.nested ?? []).map((rf) => rawToField(rf)),
+			};
+		}
+		const fs = fields.map((rf) => rawToField(rf));
+		// `select(a)` → values; `select(a,b)` or `select(a,)` → records.
+		const mode: 'values' | 'records' = (fs.length === 1 && !fields[0].nested && !trailingComma) ? 'values' : 'records';
+		return { mode, fields: fs };
+	}
+
+	function rawToField(rf: RawField): Field {
+		if (rf.nested) return { path: rf.path, projection: rawFieldsToProjection(rf.nested, false) };
+		return { path: rf.path };
+	}
+
+	function parseSelectArgs(): Projection {
+		// Capture position before trailing-comma detection.
+		const startPos = pos;
+		const fields = parseSelectList(')');
+		// Detect trailing comma: search backwards from the `)` position.
+		const beforeClose = search.slice(startPos, pos - 1).trimEnd();
+		const trailingComma = beforeClose.endsWith(',');
+		return rawFieldsToProjection(fields, trailingComma);
+	}
+
+	// Top-level loop. Switches between QP and VP based on whether we're expecting a value.
+	qp.lastIndex = 0;
+
+	function nextParser(): RegExp {
+		// Use VP when we have both path and comparator set (expecting value token).
+		return (path !== undefined && rawComp !== undefined) ? vp : qp;
+	}
+
+	let match: RegExpExecArray | null;
+	while (pos < search.length) {
+		const p = nextParser();
+		p.lastIndex = pos;
+		match = p.exec(search);
+		if (!match) break;
+		pos = p.lastIndex;
+		const [, val, op] = match;
+
+		if (expectDelim) {
+			if (val) recordError(`expected operator, got '${val}'`);
+			expectDelim = false;
+		}
+
+		if (p === vp) {
+			// Value token: finish the pending condition.
+			finishTopCond(val);
+			// op from VP: `&`, `|`, `=`, `[`, `]`, `{`, `}`, or ''.
+			// Handle the operator (logical separator or end-of-string).
+			if (op === '&' || op === '|') {
+				const lop: 'and' | 'or' = op === '&' ? 'and' : 'or';
+				closeChain(topAcc);
+				setGroupOp(topAcc, lop, recordError);
+			} else if (op === '&=' || op === '|=') {
+				chainOp = op === '&=' ? 'and' : 'or';
+				chainPath = topAcc.lastPath ?? (topAcc.chainGroup?.terms.at(-1) as Condition | undefined)?.path;
+				if (!chainPath) recordError('no preceding condition for &=/|=');
+			}
+			// Other ops (empty, brackets) fall through to next iteration.
+			continue;
+		}
+
+		// QP path.
+		switch (op) {
+			case '=':
+				if (path !== undefined) {
+					if (!FIQL_NAME.test(val)) { recordError(`invalid FIQL name '${val}'`); break; }
+					rawComp = val; fiqlMode = true;
+				} else if (chainPath) {
+					if (!FIQL_NAME.test(val)) { recordError(`invalid FIQL name '${val}'`); break; }
+					path = chainPath; rawComp = val; fiqlMode = true;
+				} else {
+					if (!val) { recordError('path required before ='); break; }
+					path = splitPath(val); rawComp = '='; verbatim = true;
+				}
+				break;
+			case '==': case '===': case '!=': case '!==': case '<': case '<=': case '>': case '>=':
+				if (chainPath) { path = chainPath; rawComp = op; }
+				else { if (!val) { recordError(`path required before ${op}`); break; } path = splitPath(val); rawComp = op; }
+				fiqlMode = false;
+				break;
+			case '&': case '|': {
+				const lop: 'and' | 'or' = op === '&' ? 'and' : 'or';
+				if (path !== undefined) finishTopCond(val);
+				closeChain(topAcc);
+				setGroupOp(topAcc, lop, recordError);
+				break;
+			}
+			case '&=': case '|=':
+				if (path !== undefined) finishTopCond(val);
+				chainOp = op === '&=' ? 'and' : 'or';
+				chainPath = topAcc.lastPath ?? (topAcc.chainGroup?.terms.at(-1) as Condition | undefined)?.path;
+				if (!chainPath) recordError('no preceding condition for &=/|=');
+				break;
+			case '': case undefined:
+				if (path !== undefined) finishTopCond(val);
+				break;
+			case ',':
+				recordError("unexpected ','");
+				break;
+			case '(': {
+				if (val) {
+					// Call function.
+					switch (val) {
+						case 'select':  result.select = parseSelectArgs();            break;
+						case 'sort':    result.sort = parseSortArgs();                break;
+						case 'limit': {
+							const args = parsePlainArgs('limit');
+							if (args.length === 1) result.limit = +args[0];
+							else if (args.length === 2) { result.offset = +args[0]; result.limit = +args[1] - result.offset; }
+							else recordError('limit takes 1 or 2 arguments');
+							break;
+						}
+						case 'group-by':
+							parsePlainArgs('group-by');
+							recordError('group-by is not implemented');
+							break;
+						default:
+							parsePlainArgs(val);
+							recordError(`unknown call function '${val}'`);
+					}
+					if (search[pos] === ',') pos++;
+					else expectDelim = true;
+					path = undefined; chainPath = undefined;
+				} else {
+					// Anonymous condition group.
+					qp.lastIndex = pos;
+					const inner = parseCondGroup(')');
+					pos = qp.lastIndex;
+					const grp = accToGroup(inner);
+					if (grp) { closeChain(topAcc); topAcc.terms.push(grp); topAcc.lastPath = undefined; }
+					if (search[pos] === ',') pos++;
+					else expectDelim = true;
+					path = undefined; chainPath = undefined;
+				}
+				break;
+			}
+			case '[': {
+				if (val) { recordError(`unexpected name '${val}' before '['`); break; }
+				qp.lastIndex = pos;
+				const inner = parseCondGroup(']');
+				pos = qp.lastIndex;
+				const grp = accToGroup(inner);
+				if (grp) { closeChain(topAcc); topAcc.terms.push(grp); topAcc.lastPath = undefined; }
+				if (search[pos] === ',') pos++;
+				else expectDelim = true;
+				path = undefined; chainPath = undefined;
+				break;
+			}
+			case ')': case ']': case '}':
+				recordError(`unexpected '${op[0]}'`);
+				break;
+			default:
+				recordError(`unexpected token '${op}'`);
+		}
+	}
+
+	if (path !== undefined) finishTopCond('');
+	closeChain(topAcc);
+	const filter = accToGroup(topAcc);
+	if (filter) result.filter = filter;
+
+	if (errorMsg) {
+		const err = new SyntaxViolation(`Unable to parse query: ${errorMsg}`);
+		if (deferErrors) { result.parseError = err; }
+		else throw err;
+	}
+
+	return result;
 }

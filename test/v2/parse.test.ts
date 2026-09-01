@@ -1,444 +1,539 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseQuery, Query, resolveComparator } from '../../src/index.ts';
+import { parseQuery, resolveFiqlName } from '../../src/index.ts';
+import type { Condition, Group, ParseResult } from '../../src/index.ts';
+
+// Helpers
+function cond(path: string[], comparator: string, value: unknown, negated?: boolean): Condition {
+	const c: Condition = { path, comparator, value: value as any };
+	if (negated) c.negated = true;
+	return c;
+}
+function andGrp(...terms: (Condition | Group)[]): Group { return { operator: 'and', terms }; }
+function orGrp(...terms: (Condition | Group)[]): Group { return { operator: 'or', terms }; }
 
 // ---------------------------------------------------------------------------
-// Ported from harper/unitTests/resources/query-parse.test.js
+// Basic conditions — single `=` is verbatim eq
 // ---------------------------------------------------------------------------
 
-describe('Parsing queries', () => {
-	it('Basic AND query', () => {
-		const query = parseQuery('id=1&name=2');
-		const conditions = Array.from(query);
-		assert.equal(conditions.length, 2);
-		assert.equal((conditions[0] as any)[0], 'id');
-		assert.equal((conditions[0] as any)[1], '1');
-		assert.equal((conditions[1] as any)[0], 'name');
-		assert.equal((conditions[1] as any)[1], '2');
+describe('Verbatim eq (single =)', () => {
+	it('simple a=b', () => {
+		const r = parseQuery('id=1');
+		assert.deepEqual(r.filter, andGrp(cond(['id'], 'eq', '1')));
 	});
 
-	it('Basic OR query', () => {
-		const query = parseQuery('id=1|name=2');
-		assert.equal(query.operator, 'or');
-		assert.equal(query.conditions!.length, 2);
-		assert.equal(query.conditions![0].attribute, 'id');
-		assert.equal(query.conditions![0].value, '1');
-		assert.equal(query.conditions![1].attribute, 'name');
-		assert.equal(query.conditions![1].value, '2');
-	});
-
-	it('Basic AND and nested OR query', () => {
-		const query = parseQuery('id=1&(value=gt=4|name=2)');
-		assert.equal(query.conditions!.length, 2);
-		assert.equal(query.conditions![0].attribute, 'id');
-		assert.equal(query.conditions![0].value, '1');
-		assert.equal((query.conditions![1] as any).operator, 'or');
-		assert.equal((query.conditions![1] as any).conditions[0].attribute, 'value');
-		assert.equal((query.conditions![1] as any).conditions[0].comparator, 'gt');
-		assert.equal((query.conditions![1] as any).conditions[1].comparator, 'equals');
-		assert.equal((query.conditions![1] as any).conditions[1].value, '2');
-	});
-
-	it('Basic OR and nested AND/OR query', () => {
-		const query = parseQuery('(value!=4&name=2)|id=5|(foo=bar&name=2&(value=gt=4|name=2))');
-		assert.equal(query.operator, 'or');
-		assert.equal(query.conditions!.length, 3);
-		const g0 = query.conditions![0] as any;
-		assert.equal(g0.operator, 'and');
-		assert.equal(g0.conditions[0].attribute, 'value');
-		assert.equal(g0.conditions[0].comparator, 'ne');
-		assert.equal(g0.conditions[0].value, '4');
-		assert.equal(g0.conditions[1].attribute, 'name');
-		assert.equal(g0.conditions[1].comparator, 'equals');
-		assert.equal(g0.conditions[1].value, '2');
-		const c1 = query.conditions![1] as any;
-		assert.equal(c1.attribute, 'id');
-		assert.equal(c1.value, '5');
-		const g2 = query.conditions![2] as any;
-		assert.equal(g2.operator, 'and');
-		assert.equal(g2.conditions[0].attribute, 'foo');
-		assert.equal(g2.conditions[0].comparator, 'equals');
-		assert.equal(g2.conditions[0].value, 'bar');
-		assert.equal(g2.conditions[1].attribute, 'name');
-		assert.equal(g2.conditions[1].comparator, 'equals');
-		assert.equal(g2.conditions[1].value, '2');
-		assert.equal(g2.conditions[2].operator, 'or');
-		assert.equal(g2.conditions[2].conditions[0].attribute, 'value');
-		assert.equal(g2.conditions[2].conditions[0].comparator, 'gt');
-		assert.equal(g2.conditions[2].conditions[0].value, '4');
-		assert.equal(g2.conditions[2].conditions[1].comparator, 'equals');
-		assert.equal(g2.conditions[2].conditions[1].value, '2');
-	});
-
-	it('OR and nested AND/OR query with brackets and parens in values', () => {
-		const query = parseQuery('[value!=4&name=2]|id=5|[foo=ba)r&name=2&[value=gt=(4)|name=2]]|id=6');
-		assert.equal(query.operator, 'or');
-		assert.equal(query.conditions!.length, 4);
-		const g0 = query.conditions![0] as any;
-		assert.equal(g0.operator, 'and');
-		assert.equal(g0.conditions[0].attribute, 'value');
-		assert.equal(g0.conditions[0].comparator, 'ne');
-		assert.equal(g0.conditions[0].value, '4');
-		assert.equal(g0.conditions[1].attribute, 'name');
-		assert.equal(g0.conditions[1].comparator, 'equals');
-		assert.equal(g0.conditions[1].value, '2');
-		const c1 = query.conditions![1] as any;
-		assert.equal(c1.attribute, 'id');
-		assert.equal(c1.value, '5');
-		const g2 = query.conditions![2] as any;
-		assert.equal(g2.operator, 'and');
-		assert.equal(g2.conditions[0].attribute, 'foo');
-		assert.equal(g2.conditions[0].comparator, 'equals');
-		assert.equal(g2.conditions[0].value, 'ba)r');
-		assert.equal(g2.conditions[1].attribute, 'name');
-		assert.equal(g2.conditions[1].comparator, 'equals');
-		assert.equal(g2.conditions[1].value, '2');
-		assert.equal(g2.conditions[2].operator, 'or');
-		assert.equal(g2.conditions[2].conditions[0].attribute, 'value');
-		assert.equal(g2.conditions[2].conditions[0].comparator, 'gt');
-		assert.equal(g2.conditions[2].conditions[0].value, '(4)');
-		assert.equal(g2.conditions[2].conditions[1].comparator, 'equals');
-		assert.equal(g2.conditions[2].conditions[1].value, '2');
-		const c3 = query.conditions![3] as any;
-		assert.equal(c3.attribute, 'id');
-	});
-
-	it('Query and select and limit', () => {
-		const query = parseQuery('id=1&name=2&select(id,name)&limit(10)');
-		assert.equal(query.conditions!.length, 2);
-		assert.equal(query.conditions![0].attribute, 'id');
-		assert.equal(query.conditions![0].value, '1');
-		assert.equal(query.conditions![1].attribute, 'name');
-		assert.equal(query.conditions![1].value, '2');
-		assert.equal(query.select!.length, 2);
-		assert.equal(query.select![0], 'id');
-		assert.equal(query.select![1], 'name');
-		assert.equal(query.limit, 10);
-	});
-
-	it('Limit with offset', () => {
-		const query = parseQuery('limit(5,10)');
-		assert.equal(query.conditions!.length, 0);
-		assert.equal(query.offset, 5);
-		assert.equal(query.limit, 5);
-	});
-
-	it('Coercible vs strict', () => {
-		const query = parseQuery(
-			'id=1&foo==number:5&bar==null&baz!=boolean:true&qux!=date:2024-01-05T20%3A07%3A27.955Z&strict===number:5'
-		);
-		assert.equal(query.conditions!.length, 6);
-		assert.equal(query.conditions![0].attribute, 'id');
-		assert.equal(query.conditions![0].value, '1');
-		assert.equal(query.conditions![1].value, 5);
-		assert.equal(query.conditions![2].value, null);
-		assert.equal(query.conditions![3].value, true);
-		assert.ok(query.conditions![4].value instanceof Date);
-		assert.equal(query.conditions![5].value, 'number:5');
-	});
-
-	it('Coerce date', () => {
-		const query = parseQuery('time=lt=date:2024-01-05T20%3A07%3A27.955Z&time=gt=date:1602872124871');
-		assert.equal(query.conditions!.length, 2);
-		assert.equal(query.conditions![0].attribute, 'time');
-		assert.equal((query.conditions![0].value as Date).getTime(), new Date('2024-01-05T20:07:27.955Z').getTime());
-		assert.equal((query.conditions![1].value as Date).getTime(), 1602872124871);
-	});
-
-	it('Nested select', () => {
-		const query = parseQuery('select(related{name,otherTable{other_name}},id,name)');
-		assert.equal(query.conditions!.length, 0);
-		assert.equal(query.select!.length, 3);
-		assert.equal((query.select![0] as any).name, 'related');
-		assert.equal((query.select![0] as any).length, 2);
-		assert.equal((query.select![0] as any)[0], 'name');
-		assert.equal((query.select![0] as any)[1].name, 'otherTable');
-		assert.equal((query.select![0] as any)[1].length, 1);
-		assert.equal((query.select![0] as any)[1][0], 'other_name');
-	});
-
-	it('Nested select using select', () => {
-		const query = parseQuery('select(related[select(name,otherTable[select(other_name,)])],id,name)');
-		assert.equal(query.conditions!.length, 0);
-		assert.equal(query.select!.length, 3);
-		assert.equal((query.select![0] as any).name, 'related');
-		assert.equal((query.select![0] as any).select.length, 2);
-		assert.equal((query.select![0] as any).select[0], 'name');
-		assert.equal((query.select![0] as any).select[1].name, 'otherTable');
-		assert.equal((query.select![0] as any).select[1].select.length, 1);
-		assert.equal((query.select![0] as any).select[1].select[0], 'other_name');
-	});
-
-	it('Multi-part properties', () => {
-		const query = parseQuery('name.subname=2');
-		assert.equal(query.conditions!.length, 1);
-		assert.deepEqual(query.conditions![0].attribute, ['name', 'subname']);
-	});
-
-	it('Multi-part properties in sort', () => {
-		const query = parseQuery('name.subname=2&sort(name.subname)');
-		assert.equal(query.conditions!.length, 1);
-		assert.deepEqual(query.conditions![0].attribute, ['name', 'subname']);
-		assert.deepEqual(query.sort!.attribute, ['name', 'subname']);
-	});
-
-	it('Multi-part properties in complex sort', () => {
-		const query = parseQuery('name.subname=2&sort(+name.subname,-otherName)');
-		assert.deepEqual(query.sort!.attribute, ['name', 'subname']);
-		assert.equal(query.sort!.descending, false);
-		assert.equal(query.sort!.next!.attribute, 'otherName');
-		assert.equal(query.sort!.next!.descending, true);
-	});
-
-	it('Union with calls', () => {
-		const query = parseQuery('select(name,age)&name=2|name=3&sort(+name)');
-		assert.equal(query.sort!.attribute, 'name');
-		assert.equal(query.operator, 'or');
-		assert.equal(query.conditions!.length, 2);
-		assert.deepEqual(query.select, ['name', 'age']);
-	});
-
-	it('Bracket/array parameter', () => {
-		const query = parseQuery('itemIds[]=1&itemIds[]=2');
-		assert.equal(query.conditions!.length, 2);
-		assert.equal(query.conditions![0].value, '1');
-		assert.equal(query.conditions![1].value, '2');
-	});
-
-	it('Bad calls', () => {
-		assert.throws(() => parseQuery('limit(5,10'), /expected '\)'/);
-		assert.throws(() => parseQuery('unknown(5,10)'), /unknown query function call/);
-		assert.throws(() => parseQuery('select([)'), /expected '\]'/);
-		assert.throws(() => parseQuery('select)'), /unexpected token '\)'/);
-	});
-
-	it('Bad nesting', () => {
-		assert.throws(() => parseQuery('(name=value)shouldntbehere'), /expected operator/);
-		assert.throws(() => parseQuery('(name))'), /no attribute/);
-		assert.throws(() => parseQuery('(=value&=test)'), /attribute must be specified/);
-		assert.throws(() => parseQuery('(name=(value))'), /no attribute/);
-		assert.throws(() => parseQuery('name=value|test=3&foo=bar'), /mix operators/);
-		assert.throws(() => parseQuery('name=value&[test=3&foo=bar|test=4]'), /mix operators/);
+	it('a=b&c=d → and group, verbatim strings', () => {
+		const r = parseQuery('id=1&name=alice');
+		assert.deepEqual(r.filter, andGrp(
+			cond(['id'], 'eq', '1'),
+			cond(['name'], 'eq', 'alice'),
+		));
 	});
 });
 
-describe('Parsing queries with target (RequestTarget-style)', () => {
-	it('Basic AND query', () => {
-		const target = new Query();
-		target.conditions = [];
-		parseQuery('id=1&name=2', target);
-		// fast path: target untouched, iterate as URLSearchParams (nothing set in target)
-		// Actually fast path with target returns target as-is.
-		// Use a fresh parseQuery without target to test fast-path iteration.
-		const query = parseQuery('id=1&name=2');
-		const conditions = Array.from(query);
-		assert.equal(conditions.length, 2);
-		assert.equal((conditions[0] as any)[0], 'id');
-		assert.equal((conditions[0] as any)[1], '1');
+describe('Interpreted eq (==)', () => {
+	it('a==b → eq interpreted', () => {
+		const r = parseQuery('foo==number:5');
+		assert.deepEqual(r.filter, andGrp(cond(['foo'], 'eq', 5)));
 	});
 
-	it('Basic OR query with target', () => {
-		const target = new Query();
-		parseQuery('id=1|name=2', target);
-		assert.equal(target.operator, 'or');
-		assert.equal(target.conditions!.length, 2);
-		assert.equal(target.conditions![0].attribute, 'id');
-		assert.equal(target.conditions![0].value, '1');
-		assert.equal(target.conditions![1].attribute, 'name');
-		assert.equal(target.conditions![1].value, '2');
+	it('a==null → null value', () => {
+		const r = parseQuery('bar==null');
+		assert.deepEqual(r.filter, andGrp(cond(['bar'], 'eq', null)));
+	});
+});
+
+describe('Negated eq (!=)', () => {
+	it('a!=b → negated eq, interpreted', () => {
+		const r = parseQuery('baz!=boolean:true');
+		assert.deepEqual(r.filter, andGrp(cond(['baz'], 'eq', true, true)));
+	});
+});
+
+describe('Strict verbatim (===, !==)', () => {
+	it('===value stays as string', () => {
+		const r = parseQuery('strict===number:5');
+		// verbatim — no interpretation
+		assert.deepEqual(r.filter, andGrp(cond(['strict'], 'eq', 'number:5')));
 	});
 
-	it('Basic AND and nested OR query with target', () => {
-		const target = new Query();
-		parseQuery('id=1&(value=gt=4|name=2)', target);
-		assert.equal(target.conditions!.length, 2);
-		assert.equal(target.conditions![0].attribute, 'id');
-		assert.equal(target.conditions![0].value, '1');
-		assert.equal((target.conditions![1] as any).operator, 'or');
+	it('!==value → negated eq, verbatim', () => {
+		const r = parseQuery('x!==foo');
+		assert.deepEqual(r.filter, andGrp(cond(['x'], 'eq', 'foo', true)));
+	});
+});
+
+describe('Ordered comparators', () => {
+	it('< > <= >=', () => {
+		const r = parseQuery('price<10&qty<=5&age>18&score>=90');
+		assert.deepEqual(r.filter, andGrp(
+			cond(['price'], 'lt', '10'),
+			cond(['qty'], 'le', '5'),
+			cond(['age'], 'gt', '18'),
+			cond(['score'], 'ge', '90'),
+		));
+	});
+
+	it('FIQL lt/le/gt/ge', () => {
+		const r = parseQuery('age=gt=4');
+		assert.deepEqual(r.filter, andGrp(cond(['age'], 'gt', '4')));
 	});
 });
 
 // ---------------------------------------------------------------------------
-// Ported from harper/unitTests/resources/query-tier1.test.js
-// 'REST query parsing' describe block (~lines 152–197)
+// OR and grouping
 // ---------------------------------------------------------------------------
 
-describe('resolveComparator helper', () => {
-	it('preserves existing aliases as-is', () => {
-		assert.deepEqual(resolveComparator('eq'), { comparator: 'eq', negated: false });
-		assert.deepEqual(resolveComparator('not_equal'), { comparator: 'not_equal', negated: false });
-		assert.deepEqual(resolveComparator('greater_than'), { comparator: 'greater_than', negated: false });
+describe('OR query', () => {
+	it('id=1|name=2', () => {
+		const r = parseQuery('id=1|name=2');
+		assert.deepEqual(r.filter, orGrp(cond(['id'], 'eq', '1'), cond(['name'], 'eq', '2')));
 	});
 
-	it('strips not_ prefix on negatable comparators', () => {
-		assert.deepEqual(resolveComparator('not_in'), { comparator: 'in', negated: true });
-		assert.deepEqual(resolveComparator('not_starts_with'), { comparator: 'starts_with', negated: true });
-		assert.deepEqual(resolveComparator('not_between'), { comparator: 'between', negated: true });
-		assert.deepEqual(resolveComparator('not_contains'), { comparator: 'contains', negated: true });
-		assert.deepEqual(resolveComparator('not_ends_with'), { comparator: 'ends_with', negated: true });
+	it('nested: id=1&(a=gt=4|name=2)', () => {
+		const r = parseQuery('id=1&(value=gt=4|name=2)');
+		assert.deepEqual(r.filter, andGrp(
+			cond(['id'], 'eq', '1'),
+			orGrp(cond(['value'], 'gt', '4'), cond(['name'], 'eq', '2')),
+		));
 	});
 
-	it('returns input unchanged for unknown comparators', () => {
-		assert.deepEqual(resolveComparator('unknown'), { comparator: 'unknown', negated: false });
-		assert.deepEqual(resolveComparator(undefined), { comparator: undefined, negated: false });
-	});
-});
-
-describe('REST query parsing', () => {
-	it('parses (v1,v2,v3) list-value syntax with `in`', () => {
-		const q = parseQuery('status=in=(active,pending,inactive)');
-		assert.equal(q.conditions![0].comparator, 'in');
-		assert.deepEqual(q.conditions![0].value, ['active', 'pending', 'inactive']);
+	it('complex nested: (ne!=4&name=2)|id=5|(foo=bar&name=2&(a=gt=4|name=2))', () => {
+		const r = parseQuery('(value!=4&name=2)|id=5|(foo=bar&name=2&(value=gt=4|name=2))');
+		assert.equal(r.filter!.operator, 'or');
+		assert.equal(r.filter!.terms.length, 3);
+		assert.equal((r.filter!.terms[0] as Group).operator, 'and');
+		assert.equal((r.filter!.terms[0] as Group).terms[0].comparator, 'eq');
+		assert.equal(((r.filter!.terms[0] as Group).terms[0] as Condition).negated, true);
 	});
 
-	it('parses single-element list', () => {
-		const q = parseQuery('status=in=(active)');
-		assert.deepEqual(q.conditions![0].value, ['active']);
-	});
-
-	it('parses empty list', () => {
-		const q = parseQuery('status=in=()');
-		assert.deepEqual(q.conditions![0].value, []);
-	});
-
-	it('parses not_in to negated in', () => {
-		const q = parseQuery('status=not_in=(active,pending)');
-		assert.equal(q.conditions![0].comparator, 'in');
-		assert.deepEqual(q.conditions![0].value, ['active', 'pending']);
-		assert.equal(q.conditions![0].negated, true);
-	});
-
-	it('parses not_starts_with as negated starts_with', () => {
-		const q = parseQuery('name=not_starts_with=Joh');
-		assert.equal(q.conditions![0].comparator, 'starts_with');
-		assert.equal(q.conditions![0].value, 'Joh');
-		assert.equal(q.conditions![0].negated, true);
-	});
-
-	it('parses between with list value', () => {
-		const q = parseQuery('age=between=(18,65)');
-		assert.equal(q.conditions![0].comparator, 'between');
-		assert.deepEqual(q.conditions![0].value, ['18', '65']);
-	});
-
-	it('parses typed values inside list', () => {
-		const q = parseQuery('id=in=(number:1,number:2,number:3)');
-		assert.deepEqual(q.conditions![0].value, [1, 2, 3]);
-	});
-
-	it('preserves backwards-compat for non-list (...) values on non-list comparators', () => {
-		const q = parseQuery('value=gt=(4)');
-		assert.equal(q.conditions![0].value, '(4)');
-	});
-
-	it('accepts multi-character FIQL operators', () => {
-		const q = parseQuery('a=between=(1,2)|b=in=(x,y)');
-		assert.equal(q.conditions![0].comparator, 'between');
-		assert.equal(q.conditions![1].comparator, 'in');
+	it('bracket groups [...]', () => {
+		const r = parseQuery('[value!=4&name=2]|id=5');
+		assert.equal(r.filter!.operator, 'or');
+		assert.equal((r.filter!.terms[0] as Group).operator, 'and');
+		assert.equal((r.filter!.terms[1] as Condition).path[0], 'id');
 	});
 });
 
 // ---------------------------------------------------------------------------
-// New: reentrancy and URLSearchParams behavior
+// Desugaring: comparator aliases
 // ---------------------------------------------------------------------------
 
-describe('Reentrancy', () => {
-	it('sequential parses with errors do not pollute subsequent parses', () => {
-		assert.throws(() => parseQuery('name=value|test=3&foo=bar'), /mix operators/);
-		// fresh parse after the failed one must succeed cleanly
-		const q = parseQuery('status=in=(active,pending)');
-		assert.equal(q.conditions![0].comparator, 'in');
-		assert.deepEqual(q.conditions![0].value, ['active', 'pending']);
+describe('Alias desugaring', () => {
+	it('ne → negated eq', () => {
+		const r = parseQuery('a=ne=1');
+		assert.deepEqual(r.filter, andGrp(cond(['a'], 'eq', '1', true)));
 	});
 
-	it('two independent parses return independent results', () => {
-		const a = parseQuery('id=1|name=2');
-		const b = parseQuery('foo=gt=5&bar=lt=10');
-		assert.equal(a.operator, 'or');
-		assert.equal(a.conditions![0].attribute, 'id');
-		assert.equal(b.conditions![0].attribute, 'foo');
-		assert.equal(b.conditions![0].comparator, 'gt');
-		assert.equal(b.conditions![1].comparator, 'lt');
+	it('equals → eq (verbatim)', () => {
+		const r = parseQuery('a=equals=hello');
+		assert.deepEqual(r.filter, andGrp(cond(['a'], 'eq', 'hello')));
 	});
 
-	it('failed mid-parse does not corrupt a later successful parse', () => {
-		const target = new Query();
-		parseQuery('limit(5,10', target); // mismatched paren — writes parseError
-		assert.ok(target.parseError);
-		// new independent parse
-		const q = parseQuery('age=between=(18,65)');
-		assert.equal(q.conditions![0].comparator, 'between');
-		assert.deepEqual(q.conditions![0].value, ['18', '65']);
-	});
-});
-
-describe('Query extends URLSearchParams', () => {
-	it('fast-path: get() and getAll() work', () => {
-		const q = parseQuery('foo=bar&foo=baz&x=1');
-		assert.equal(q.get('foo'), 'bar');
-		assert.deepEqual(q.getAll('foo'), ['bar', 'baz']);
+	it('not_equal → negated eq (verbatim)', () => {
+		const r = parseQuery('a=not_equal=hello');
+		assert.deepEqual(r.filter, andGrp(cond(['a'], 'eq', 'hello', true)));
 	});
 
-	it('fast-path: iteration yields [name, value] pairs', () => {
-		const q = parseQuery('a=1&b=2');
-		const entries = Array.from(q);
-		assert.deepEqual(entries, [['a', '1'], ['b', '2']]);
+	it('ne and != produce same canonical form (interpreted)', () => {
+		const a = parseQuery('x=ne=1');
+		const b = parseQuery('x!=1');
+		// Both → negated eq, interpreted (both have string '1' since 1 is a bare number token)
+		assert.deepEqual(a.filter, b.filter);
 	});
 
-	it('parsed-path: Query is still a URLSearchParams instance', () => {
-		const q = parseQuery('id=1|name=2');
-		assert.ok(q instanceof URLSearchParams);
-		assert.ok(q instanceof Query);
+	it('sw/ew/ct aliases', () => {
+		assert.deepEqual(parseQuery('a=sw=foo').filter, andGrp(cond(['a'], 'starts_with', 'foo')));
+		assert.deepEqual(parseQuery('a=ew=bar').filter, andGrp(cond(['a'], 'ends_with', 'bar')));
+		assert.deepEqual(parseQuery('a=ct=baz').filter, andGrp(cond(['a'], 'contains', 'baz')));
 	});
 
-	it('parsed-path with target: target is returned as Query instance', () => {
-		const target = new Query();
-		const result = parseQuery('id=1|name=2', target);
-		assert.strictEqual(result, target);
-		assert.ok(result instanceof Query);
+	it('less_than / greaterThan aliases', () => {
+		assert.deepEqual(parseQuery('a=less_than=5').filter, andGrp(cond(['a'], 'lt', '5')));
+		assert.deepEqual(parseQuery('a=greaterThan=5').filter, andGrp(cond(['a'], 'gt', '5')));
 	});
 
-	it('empty string returns empty Query', () => {
-		const q = parseQuery('');
-		assert.ok(q instanceof Query);
-		assert.equal(q.conditions, undefined);
+	it('out → negated in', () => {
+		const r = parseQuery('a=out=(1,2)');
+		const c = r.filter!.terms[0] as Condition;
+		assert.equal(c.comparator, 'in');
+		assert.equal(c.negated, true);
+		assert.deepEqual(c.value, ['1', '2']);
 	});
 });
 
 // ---------------------------------------------------------------------------
-// group-by fix: must NOT fall through into sort
+// between desugaring
 // ---------------------------------------------------------------------------
 
-describe('group-by fix', () => {
-	it('group-by records error without setting sort', () => {
-		const target = new Query();
-		parseQuery('group-by(foo)', target);
-		assert.ok(target.parseError, 'should have a parseError');
-		assert.match(target.parseError!.message, /group by/);
-		assert.equal(target.sort, undefined, 'group-by must not set sort');
+describe('between desugaring', () => {
+	it('between=(lo,hi) → and-group of ge+le', () => {
+		const r = parseQuery('age=between=(18,65)');
+		assert.deepEqual(r.filter, andGrp(
+			andGrp(cond(['age'], 'ge', '18'), cond(['age'], 'le', '65')),
+		));
 	});
 
-	it('group-by does not clobber a preceding sort() call', () => {
-		const target = new Query();
-		parseQuery('sort(name)&group-by(foo)', target);
-		assert.ok(target.parseError);
-		// sort set by the preceding sort() call must survive
-		assert.equal(target.sort!.attribute, 'name');
+	it('not_between=(lo,hi) → or-group of negated ge+le', () => {
+		const r = parseQuery('age=not_between=(18,65)');
+		assert.deepEqual(r.filter, andGrp(
+			orGrp(cond(['age'], 'ge', '18', true), cond(['age'], 'le', '65', true)),
+		));
+	});
+
+	it('between with typed values', () => {
+		const r = parseQuery('score=between=(number:10,number:99)');
+		const sub = (r.filter!.terms[0] as Group).terms;
+		assert.equal((sub[0] as Condition).value, 10);
+		assert.equal((sub[1] as Condition).value, 99);
 	});
 });
 
 // ---------------------------------------------------------------------------
-// Wildcard behavior
+// Chaining (&= / |=) desugaring
 // ---------------------------------------------------------------------------
 
-describe('Wildcard handling', () => {
-	it('trailing * on == converts to starts_with', () => {
-		const q = parseQuery('name==John*');
-		assert.equal(q.conditions![0].comparator, 'starts_with');
-		assert.equal(q.conditions![0].value, 'John');
+describe('Chaining desugaring', () => {
+	it('age=ge=20&=le=30 → and sub-group of ge+le', () => {
+		const r = parseQuery('age=ge=20&=le=30');
+		// Top-level filter is an and-Group wrapping the chain sub-group.
+		const sub = r.filter!.terms[0] as Group;
+		assert.equal(sub.operator, 'and');
+		assert.equal(sub.terms.length, 2);
+		assert.equal((sub.terms[0] as Condition).comparator, 'ge');
+		assert.equal((sub.terms[1] as Condition).comparator, 'le');
+		assert.deepEqual((sub.terms[0] as Condition).path, ['age']);
+		assert.deepEqual((sub.terms[1] as Condition).path, ['age']);
+	});
+
+	it('|= produces or sub-group', () => {
+		const r = parseQuery('status=eq=active|=eq=pending');
+		const sub = r.filter!.terms[0] as Group;
+		assert.equal(sub.operator, 'or');
+		assert.equal((sub.terms[0] as Condition).value, 'active');
+		assert.equal((sub.terms[1] as Condition).value, 'pending');
+	});
+});
+
+// ---------------------------------------------------------------------------
+// in comparator
+// ---------------------------------------------------------------------------
+
+describe('in comparator', () => {
+	it('(v1,v2,v3) list', () => {
+		const r = parseQuery('status=in=(active,pending,inactive)');
+		const c = r.filter!.terms[0] as Condition;
+		assert.equal(c.comparator, 'in');
+		assert.deepEqual(c.value, ['active', 'pending', 'inactive']);
+	});
+
+	it('empty list', () => {
+		const r = parseQuery('status=in=()');
+		assert.deepEqual((r.filter!.terms[0] as Condition).value, []);
+	});
+
+	it('typed values in list', () => {
+		const r = parseQuery('id=in=(number:1,number:2,number:3)');
+		assert.deepEqual((r.filter!.terms[0] as Condition).value, [1, 2, 3]);
+	});
+
+	it('not_in → negated in', () => {
+		const r = parseQuery('status=not_in=(active,pending)');
+		const c = r.filter!.terms[0] as Condition;
+		assert.equal(c.comparator, 'in');
+		assert.equal(c.negated, true);
+		assert.deepEqual(c.value, ['active', 'pending']);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Wildcard
+// ---------------------------------------------------------------------------
+
+describe('Wildcard', () => {
+	it('trailing * on == → starts_with', () => {
+		const r = parseQuery('name==John*');
+		assert.deepEqual(r.filter, andGrp(cond(['name'], 'starts_with', 'John')));
 	});
 
 	it('non-trailing * throws', () => {
 		assert.throws(() => parseQuery('name==*John'), /wildcard/);
+	});
+
+	it('not_starts_with via FIQL', () => {
+		const r = parseQuery('name=not_starts_with=Joh');
+		const c = r.filter!.terms[0] as Condition;
+		assert.equal(c.comparator, 'starts_with');
+		assert.equal(c.negated, true);
+		assert.equal(c.value, 'Joh');
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Typed values
+// ---------------------------------------------------------------------------
+
+describe('Typed values', () => {
+	it('number:, boolean:, date:', () => {
+		const r = parseQuery('a==number:5&b==boolean:true&c!=date:2024-01-05T20%3A07%3A27.955Z');
+		const terms = r.filter!.terms as Condition[];
+		assert.equal(terms[0].value, 5);
+		assert.equal(terms[1].value, true);
+		assert.ok(terms[2].value instanceof Date);
+		assert.equal((terms[2].value as Date).getTime(), new Date('2024-01-05T20:07:27.955Z').getTime());
+	});
+
+	it('date: with numeric epoch', () => {
+		const r = parseQuery('time=gt=date:1602872124871');
+		assert.ok((r.filter!.terms[0] as Condition).value instanceof Date);
+		assert.equal(((r.filter!.terms[0] as Condition).value as Date).getTime(), 1602872124871);
+	});
+
+	it('number:$X base-36', () => {
+		const r = parseQuery('x==number:$z');
+		assert.equal((r.filter!.terms[0] as Condition).value, 35);
+	});
+
+	it('string: prefix suppresses interpretation', () => {
+		const r = parseQuery('x==string:null');
+		assert.equal((r.filter!.terms[0] as Condition).value, 'null');
+	});
+
+	it('unknown type prefix throws', () => {
+		assert.throws(() => parseQuery('x==custom:foo'), /Unknown type prefix/);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Property paths
+// ---------------------------------------------------------------------------
+
+describe('Property paths', () => {
+	it('dotted path → multi-segment', () => {
+		const r = parseQuery('name.subname=2');
+		assert.deepEqual((r.filter!.terms[0] as Condition).path, ['name', 'subname']);
+	});
+
+	it('%2E in segment is a literal dot (single segment)', () => {
+		const r = parseQuery('a%2Eb==3');
+		assert.deepEqual((r.filter!.terms[0] as Condition).path, ['a.b']);
+	});
+
+	it('a.b path vs a%2Eb path are different', () => {
+		const dotted = parseQuery('a.b==3');
+		const encoded = parseQuery('a%2Eb==3');
+		assert.deepEqual((dotted.filter!.terms[0] as Condition).path, ['a', 'b']);
+		assert.deepEqual((encoded.filter!.terms[0] as Condition).path, ['a.b']);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Sort
+// ---------------------------------------------------------------------------
+
+describe('sort()', () => {
+	it('single field ascending', () => {
+		const r = parseQuery('sort(name)');
+		assert.deepEqual(r.sort, [{ path: ['name'], direction: 'asc' }]);
+	});
+
+	it('+ and - prefixes', () => {
+		const r = parseQuery('sort(+name,-age)');
+		assert.deepEqual(r.sort, [
+			{ path: ['name'], direction: 'asc' },
+			{ path: ['age'], direction: 'desc' },
+		]);
+	});
+
+	it('dotted sort key', () => {
+		const r = parseQuery('sort(name.subname)');
+		assert.deepEqual(r.sort, [{ path: ['name', 'subname'], direction: 'asc' }]);
+	});
+
+	it('conditions + sort', () => {
+		const r = parseQuery('name.subname=2&sort(+name.subname,-otherName)');
+		assert.deepEqual(r.sort, [
+			{ path: ['name', 'subname'], direction: 'asc' },
+			{ path: ['otherName'], direction: 'desc' },
+		]);
+		assert.deepEqual((r.filter!.terms[0] as Condition).path, ['name', 'subname']);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// limit / offset
+// ---------------------------------------------------------------------------
+
+describe('limit()', () => {
+	it('limit(10) → limit=10', () => {
+		const r = parseQuery('limit(10)');
+		assert.equal(r.limit, 10);
+		assert.equal(r.offset, undefined);
+	});
+
+	it('limit(5,10) → offset=5, limit=5', () => {
+		const r = parseQuery('limit(5,10)');
+		assert.equal(r.offset, 5);
+		assert.equal(r.limit, 5);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// select / projection
+// ---------------------------------------------------------------------------
+
+describe('select()', () => {
+	it('single field → values mode', () => {
+		const r = parseQuery('select(id)');
+		assert.deepEqual(r.select, { mode: 'values', fields: [{ path: ['id'] }] });
+	});
+
+	it('two fields → records mode', () => {
+		const r = parseQuery('select(id,name)');
+		assert.deepEqual(r.select, {
+			mode: 'records',
+			fields: [{ path: ['id'] }, { path: ['name'] }],
+		});
+	});
+
+	it('[a,b] → tuples mode', () => {
+		const r = parseQuery('select([id,name])');
+		assert.deepEqual(r.select, {
+			mode: 'tuples',
+			fields: [{ path: ['id'] }, { path: ['name'] }],
+		});
+	});
+
+	it('nested brace select', () => {
+		const r = parseQuery('select(related{name,other_name},id)');
+		assert.deepEqual(r.select!.mode, 'records');
+		assert.equal(r.select!.fields[0].path[0], 'related');
+		assert.deepEqual(r.select!.fields[0].projection, {
+			mode: 'records',
+			fields: [{ path: ['name'] }, { path: ['other_name'] }],
+		});
+		assert.deepEqual(r.select!.fields[1].path, ['id']);
+	});
+
+	it('select + conditions + limit', () => {
+		const r = parseQuery('id=1&name=2&select(id,name)&limit(10)');
+		assert.equal(r.filter!.terms.length, 2);
+		assert.deepEqual(r.select!.fields.map((f) => f.path), [['id'], ['name']]);
+		assert.equal(r.limit, 10);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// group-by (reserved, error)
+// ---------------------------------------------------------------------------
+
+describe('group-by', () => {
+	it('records error, does not set sort or filter', () => {
+		assert.throws(() => parseQuery('group-by(foo)'), /group-by/);
+	});
+
+	it('deferErrors collects error without throwing', () => {
+		const r = parseQuery('group-by(foo)', { deferErrors: true });
+		assert.ok(r.parseError);
+		assert.match(r.parseError.message, /group-by/);
+		assert.equal(r.sort, undefined);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Error cases
+// ---------------------------------------------------------------------------
+
+describe('Parse errors', () => {
+	it('unbalanced ( throws', () => {
+		assert.throws(() => parseQuery('limit(5,10'), /expected '\)'/);
+	});
+
+	it('unknown call function', () => {
+		assert.throws(() => parseQuery('unknown(5,10)'), /unknown call function/);
+	});
+
+	it('mixing & and | in one group', () => {
+		assert.throws(() => parseQuery('name=value|test=3&foo=bar'), /mix/);
+	});
+
+	it('prop[]=v is a parse error (not grammar)', () => {
+		// [ in condition context with a named prefix is an error.
+		assert.throws(() => parseQuery('itemIds[]=1'));
+	});
+
+	it('deferErrors mode returns error in result', () => {
+		const r = parseQuery('name=value|test=3&foo=bar', { deferErrors: true });
+		assert.ok(r.parseError);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Reentrancy
+// ---------------------------------------------------------------------------
+
+describe('Reentrancy', () => {
+	it('sequential failing then succeeding parse is independent', () => {
+		assert.throws(() => parseQuery('name=value|test=3&foo=bar'));
+		const r = parseQuery('status=in=(active,pending)');
+		assert.deepEqual((r.filter!.terms[0] as Condition).value, ['active', 'pending']);
+	});
+
+	it('two independent results', () => {
+		const a = parseQuery('id=1|name=2');
+		const b = parseQuery('foo=gt=5&bar=lt=10');
+		assert.equal(a.filter!.operator, 'or');
+		assert.equal(b.filter!.operator, 'and');
+		assert.equal((b.filter!.terms[0] as Condition).comparator, 'gt');
+	});
+});
+
+// ---------------------------------------------------------------------------
+// resolveFiqlName conformance
+// ---------------------------------------------------------------------------
+
+describe('resolveFiqlName', () => {
+	it('core comparators pass through', () => {
+		const r = resolveFiqlName('eq');
+		assert.equal(r.comparator, 'eq');
+		assert.equal(r.negated, false);
+	});
+
+	it('not_ prefix negates', () => {
+		const r = resolveFiqlName('not_in');
+		assert.equal(r.comparator, 'in');
+		assert.equal(r.negated, true);
+	});
+
+	it('ne → negated eq interpreted', () => {
+		const r = resolveFiqlName('ne');
+		assert.equal(r.comparator, 'eq');
+		assert.equal(r.negated, true);
+		assert.equal(r.verbatim, false);
+	});
+
+	it('equals → eq verbatim', () => {
+		const r = resolveFiqlName('equals');
+		assert.equal(r.comparator, 'eq');
+		assert.equal(r.verbatim, true);
+	});
+
+	it('not_equal → negated eq verbatim', () => {
+		const r = resolveFiqlName('not_equal');
+		assert.equal(r.comparator, 'eq');
+		assert.equal(r.negated, true);
+		assert.equal(r.verbatim, true);
+	});
+
+	it('between is flagged for desugaring', () => {
+		const r = resolveFiqlName('between');
+		assert.ok(r.isBetween);
+		assert.equal(r.betweenNegated, false);
+	});
+
+	it('unknown name passes through', () => {
+		const r = resolveFiqlName('fuzzy_match');
+		assert.equal(r.comparator, 'fuzzy_match');
+		assert.equal(r.negated, false);
 	});
 });

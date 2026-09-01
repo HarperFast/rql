@@ -1,62 +1,44 @@
-export type Operator = 'and' | 'or';
+// §6 canonical parsed representation — language-neutral; JSON-serializable.
 
-export type Comparator =
-	| 'between'
-	| 'contains'
-	| 'ends_with'
-	| 'eq'
-	| 'equals'
-	| 'gt'
-	| 'ge'
-	| 'lt'
-	| 'le'
-	| 'greater_than'
-	| 'greater_than_equal'
-	| 'in'
-	| 'less_than'
-	| 'less_than_equal'
-	| 'ne'
-	| 'not_equal'
-	| 'starts_with';
+export type Value = string | number | boolean | null | Date | Value[];
 
-/**
- * A direct (leaf) condition. Consumers read `c[0] ?? c.attribute` and `c[1] ?? c.value`
- * to handle both parsed objects and URLSearchParams [name, value] tuples from the fast path.
- */
-export interface DirectCondition<V = unknown> {
-	attribute?: string | string[] | null;
-	comparator?: string;
-	value?: V;
+export interface Condition {
+	path: string[];
+	comparator: string;
 	negated?: boolean;
-	chainedConditions?: Condition<V>[];
-	/** Internal: comparator applied to chained conditions. */
-	operator?: Operator;
+	value: Value;
 }
 
-export interface ConditionGroup<V = unknown> {
-	conditions?: Condition<V>[];
-	operator?: Operator;
+export interface Group {
+	operator: 'and' | 'or';
+	terms: (Condition | Group)[];
 }
 
-export type Condition<V = unknown> = DirectCondition<V> & ConditionGroup<V>;
-
-/** Linked-list sort descriptor. */
-export interface Sort {
-	attribute: string | string[];
-	descending?: boolean;
-	next?: Sort;
+export interface SortKey {
+	path: string[];
+	direction: 'asc' | 'desc';
 }
 
-export interface SubSelect {
-	name: string;
-	select: (string | SubSelect)[];
+export interface Field {
+	path: string[];
+	projection?: Projection;
 }
 
-/**
- * Four polymorphic shapes:
- *  1. `string[]` — flat attribute list
- *  2. `(string | SubSelect)[]` — nested via `rel{a,b}` brace syntax
- *  3. Array with `.asArray = true` — from `select([a,b])` syntax
- *  4. A Query object — from `rel[select(a,b)]` bracket syntax (has `.name`, `.select`)
- */
-export type Select = any[];
+export interface Projection {
+	mode: 'records' | 'values' | 'tuples';
+	fields: Field[];
+}
+
+export interface ParseResult {
+	filter?: Group;
+	sort?: SortKey[];
+	select?: Projection;
+	limit?: number;
+	offset?: number;
+	/** Only present when parseQuery is called with {deferErrors: true}. */
+	parseError?: import('./errors.ts').QueryError;
+}
+
+export interface ParseOptions {
+	deferErrors?: boolean;
+}

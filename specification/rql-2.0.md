@@ -84,9 +84,8 @@ scoped-match   = prop-path "[" group-body "]"
 
 condition      = prop-path symbol-op value
                / prop-path "=" fiql-name "=" ( value / value-list )
-chained-cond   = ( "&=" / "|=" / "=" ) fiql-name "=" ( value / value-list )
-               ; continues the preceding condition, scoped to the same element (§5.3);
-               ; the bare "=" spelling is an and-continuation
+chained-cond   = ( "&=" / "|=" ) fiql-name "=" value
+               ; continues the preceding condition, scoped to the same element (§5.3)
 
 symbol-op      = "=" / "==" / "===" / "!=" / "!==" / "<" / "<=" / ">" / ">="
 fiql-name      = ALPHA-UNDER *( ALPHA-UNDER / DIGIT )
@@ -230,12 +229,11 @@ matches (§5.5). Because conjunction does not distribute over that quantifier, R
 provides *element scoping*: a way to require that several comparisons hold for the
 **same** element.
 
-**Chaining** continues the preceding condition, scoped to the same element. Three
-spellings: `&=` (and), `|=` (or), and a bare `=` continuation (and):
+**Chaining** continues the preceding condition, scoped to the same element: `&=` (and)
+or `|=` (or), each followed by a named comparison:
 
 ```
 skiLengths=ge=175&=le=180       ; some ONE length is in [175, 180]
-skiLengths=ge=175=le=180        ; identical (bare "=" and-continuation, new in 2.0)
 skiLengths=ge=175&skiLengths=le=180
                                 ; DIFFERENT: some length ≥ 175 AND some
                                 ; (possibly other) length ≤ 180
@@ -462,7 +460,7 @@ Tracked so the spec stays ideal while implementations converge. As of harper `ma
 | # | Divergence | Spec position |
 |---|---|---|
 | 1 | Simple queries (no structural characters) skip parsing and surface as raw name/value pairs; consumers handle two condition shapes | §6: one canonical shape; lazy representations are a host affordance outside the model |
-| 2 | `&=`/`|=` chains attach to the prior condition as `chainedConditions` | semantically correct (same-element scoping, §5.3); divergence is representational only — canonical form is ElementMatch. The bare `=op=` and-continuation spelling (new in 2.0) is not yet accepted |
+| 2 | `&=`/`|=` chains attach to the prior condition as `chainedConditions`; a nameless chain leg (`a=ge=1&=5`) is accepted and inherits the previous leg's comparator | semantically correct (same-element scoping, §5.3); representational divergence only — canonical form is ElementMatch. Nameless legs are a syntax error in 2.0 (the comparator name is required) |
 | 3 | Strict vs. converting comparison is modeled as distinct comparators (`equals`/`not_equal` vs `eq`/`ne`) | §5.2: one `eq`; verbatim vs. interpreted is a property of the value literal |
 | 4 | `between` is a first-class comparator | Appendix B alias, desugars to `ge`+`le` |
 | 5 | Sort is a linked list; select is a polymorphic array with marker properties (`asArray`, `name`) | §6: sort is an ordered list of SortKeys; projection is mode + fields |
