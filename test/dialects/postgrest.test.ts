@@ -602,6 +602,15 @@ describe('Unsupported PostgREST features', () => {
 			assert.throws(() => parsePostgrest(search), UnsupportedFeature);
 	});
 
+	it('rejects empty lists that would create undefined zero-term groups', () => {
+		for (const search of ['tags=cs.{}', 'value=gt(any).{}', 'value=gt(all).{}'])
+			assert.throws(() => parsePostgrest(search), UnsupportedFeature);
+	});
+
+	it('retains empty eq(any) as the defined canonical empty in condition', () => {
+		assert.deepEqual(parsePostgrest('value=eq(any).{}'), filtered(cond(['value'], 'in', [])));
+	});
+
 	it('does not drop related ordering because it changes pagination semantics', () => {
 		assert.throws(
 			() => parsePostgrest('order=directors(last_name).desc', { onUnsupported: 'drop' }),

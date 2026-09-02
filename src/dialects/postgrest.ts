@@ -285,6 +285,8 @@ function parseFilterValue(path: string[], expression: string, budget: ParseBudge
 			: condition(path, 'ov', parseOperand(parsed.operand), false, budget);
 	} else if (parsed.operator === 'cs') {
 		const values = parseContainmentValues('cs', parsed.operand);
+		if (values.length === 0)
+			throw new UnsupportedFeature('PostgREST cs.{} has no canonical always-true filter representation');
 		term = {
 			operator: 'and',
 			terms: values.map((value) => condition(path, 'eq', value, false, budget)),
@@ -298,6 +300,10 @@ function parseFilterValue(path: string[], expression: string, budget: ParseBudge
 		if (parsed.operator === 'eq' && parsed.argument === 'any') {
 			term = condition(path, 'in', values, false, budget);
 		} else {
+			if (values.length === 0)
+				throw new UnsupportedFeature(
+					`PostgREST ${parsed.operator}(${parsed.argument}) empty list has no canonical filter representation`,
+				);
 			term = {
 				operator: parsed.argument === 'any' ? 'or' : 'and',
 				terms: values.map((value) => condition(path, comparator, value, intrinsicallyNegated, budget)),
