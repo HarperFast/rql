@@ -154,10 +154,12 @@ async function record() {
 		},
 		// Recorded here, not rendered from the working tree: the report is committed, so a
 		// value read from `git rev-parse HEAD` would invalidate it on every later commit.
+		// Dirtiness is measured over `src/` alone — an edit to the harness itself says nothing
+		// about which parser the reference side of the report came from.
 		reference: {
 			commit: git(root, ['rev-parse', 'HEAD']) ?? 'unknown',
 			describe: git(root, ['describe', '--tags', '--always']),
-			dirty: (git(root, ['status', '--porcelain']) ?? '') !== '',
+			dirty: (git(root, ['status', '--porcelain', '--', 'src']) ?? '') !== '',
 		},
 		recordedAt: new Date().toISOString(),
 		corpusDigest: corpusDigest(),

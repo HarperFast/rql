@@ -8,11 +8,11 @@
 			"version": "5.2.2"
 		},
 		"reference": {
-			"commit": "32599416d13687d2a1805737f6f61536925ccfa6",
-			"describe": "v0.3.3-25-g3259941",
-			"dirty": true
+			"commit": "da6d661958c400e461c5bf915605bf4e2569402e",
+			"describe": "v0.3.3-27-gda6d661",
+			"dirty": false
 		},
-		"recordedAt": "2026-09-02T00:13:35.509Z",
+		"recordedAt": "2026-09-02T00:17:34.368Z",
 		"corpusDigest": "349-6b64d3e9",
 		"node": "v26.2.0"
 	},

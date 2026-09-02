@@ -26,8 +26,8 @@ disagreement is classified below; an unclassified disagreement fails the run.
 |---|---|
 | Harper commit | `11a1c489168dfb00c6a66472cef14cb3f875286f` (v5.2.2-14-g11a1c4891) |
 | Harper version | `5.2.2` |
-| Reference parser commit | `32599416d13687d2a1805737f6f61536925ccfa6` (v0.3.3-25-g3259941) **+ uncommitted changes** |
-| Fixture recorded | 2026-09-02T00:13:35.509Z |
+| Reference parser at recording | `da6d661958c400e461c5bf915605bf4e2569402e` (v0.3.3-27-gda6d661) |
+| Fixture recorded | 2026-09-02T00:17:34.368Z |
 | Recorded on Node | `v26.2.0` |
 | Corpus digest | `349-6b64d3e9` |
 | Ledger snapshot | [HarperFast/harper#2440](https://github.com/HarperFast/harper/issues/2440), 14 rows, fetched 2026-09-01T23:16:18.888Z |
@@ -35,6 +35,12 @@ disagreement is classified below; an unclassified disagreement fails the run.
 
 The ledger snapshot is a cache. [HarperFast/harper#2440](https://github.com/HarperFast/harper/issues/2440) stays canonical —
 refresh with `npm run conformance:refresh-ledger` before trusting a classification.
+
+Harper’s side of every comparison below is the recorded fixture, so it is exactly the
+commit named above. The reference side is parsed live at replay time by the parser in the
+working tree, which the row above dates only as of the recording: change `src/` and
+`npm run conformance:check` fails until the report is regenerated, and
+`npm run conformance:record` re-stamps the row.
 
 ## Totals
 
