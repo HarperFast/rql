@@ -1,15 +1,10 @@
 /**
  * Supervises the out-of-process reference parser.
  *
- * The parser itself holds no global state, so one long-lived worker is enough; what this
- * class exists for is the failure modes. A parse that never comes back must not hang the
- * corpus, and a worker that dies must not leave its promise unsettled — in both cases the
- * run has to end with a verdict rather than with a wedged process. Every path here settles
- * the request: a timeout as `timeout`, anything else as `harness-error`, both of which
- * `classify` refuses to treat as agreement.
- *
- * It lives in its own module so those paths can be tested against a deliberately broken
- * worker; a crash window cannot be verified by a test that never crashes.
+ * Every path settles the request it was given: a parse that never returns becomes `timeout`,
+ * and a worker that dies, will not start, or cannot be replaced becomes `harness-error` —
+ * neither of which `classify` will treat as agreement. A promise left unsettled here would
+ * hang the whole corpus instead.
  */
 
 import { type ChildProcess, fork } from 'node:child_process';
@@ -40,15 +35,16 @@ export class ReferenceRunner {
 	/** Set once the worker cannot be replaced; every later parse then fails fast. */
 	#dead: string | undefined;
 
+
 	constructor(options: ReferenceRunnerOptions) {
 		this.#options = options;
 	}
 
-	/** Why the runner stopped working, or undefined while it is healthy. */
 	get deadReason(): string | undefined {
 		return this.#dead;
 	}
 
+	/** Hand every in-flight parse the same failure, rather than leaving it pending. */
 	#settleAll(reason: string): void {
 		const pending = this.#pending;
 		this.#pending = new Map();
@@ -104,11 +100,7 @@ export class ReferenceRunner {
 		await this.#spawn();
 	}
 
-	/**
-	 * Parse one query. On a timeout the worker is killed and replaced, so a wedged case costs
-	 * that case and not the rest of the corpus; a replacement that will not start ends the
-	 * run's reference coverage instead of hanging it.
-	 */
+	/** On a timeout the worker is killed and replaced, so a wedged case costs only that case. */
 	parse(query: string): Promise<ReferenceOutcomes> {
 		if (this.#dead) return Promise.resolve(both({ status: 'harness-error', error: this.#dead }));
 		const child = this.#child;

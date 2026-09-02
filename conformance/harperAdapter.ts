@@ -258,7 +258,27 @@ function adaptNumber(raw: unknown, field: string): number {
 	return raw;
 }
 
+/**
+ * Result members the adapter understands. `conditions`/`operator` describe the filter;
+ * `sort`/`select`/`limit`/`offset` shape the results; `parseError`/`parseErrorMessage` carry a
+ * deferred rejection; `name` marks a scoped match. The rest are RequestTarget plumbing that
+ * carries no query semantics — the request path and id it was constructed from.
+ *
+ * Anything outside both sets is a member Harper grew after this adapter was written, and
+ * dropping it silently could let the harness report agreement on a query whose meaning changed.
+ */
+const KNOWN_RESULT_MEMBERS: ReadonlySet<string> = new Set([
+	'conditions', 'operator', 'name', 'sort', 'select', 'limit', 'offset', 'parseError', 'parseErrorMessage',
+]);
+const IGNORED_HOST_MEMBERS: ReadonlySet<string> = new Set(['id', 'isCollection', 'pathname', 'search']);
+
+function assertKnownMembers(raw: Dict): void {
+	const unknown = Object.keys(raw).filter((key) => !KNOWN_RESULT_MEMBERS.has(key) && !IGNORED_HOST_MEMBERS.has(key));
+	if (unknown.length > 0) throw new AdapterError(`unknown parse-result member(s): ${unknown.sort().join(', ')}`);
+}
+
 function adaptQueryBody(raw: Dict): ParseResult {
+	assertKnownMembers(raw);
 	const result: ParseResult = {};
 	const conditions = raw.conditions;
 	if (conditions !== undefined && conditions !== null && !Array.isArray(conditions))
