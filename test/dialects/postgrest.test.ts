@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseQuery, QueryError } from '../../src/index.ts';
-import { parsePostgrest, UnsupportedFeature } from '../../src/dialects/postgrest.ts';
+import { parsePostgREST, UnsupportedFeature } from '../../src/dialects/postgrest.ts';
 import type {
 	Condition, ElementMatch, Group, ParseResult, Projection, SortKey, Value,
 } from '../../src/index.ts';
@@ -374,92 +374,92 @@ const vectors: { name: string; search: string; expected: ParseResult }[] = [
 describe('PostgREST Appendix E conformance vectors', () => {
 	for (const vector of vectors) {
 		it(vector.name, () => {
-			assert.deepEqual(parsePostgrest(vector.search), vector.expected);
+			assert.deepEqual(parsePostgREST(vector.search), vector.expected);
 		});
 	}
 });
 
 describe('PostgREST input and shared-model behavior', () => {
 	it('accepts a leading question mark', () => {
-		assert.deepEqual(parsePostgrest('?age=gte.18'), filtered(cond(['age'], 'ge', 18)));
+		assert.deepEqual(parsePostgREST('?age=gte.18'), filtered(cond(['age'], 'ge', 18)));
 	});
 
 	it('accepts URLSearchParams without decoding values twice', () => {
 		const parameters = new URLSearchParams([['message', 'eq.100% ready']]);
-		assert.deepEqual(parsePostgrest(parameters), filtered(cond(['message'], 'eq', '100% ready')));
+		assert.deepEqual(parsePostgREST(parameters), filtered(cond(['message'], 'eq', '100% ready')));
 	});
 
 	it('accepts searchParams from a URL object', () => {
 		const url = new URL('https://example.test/?id=eq.1&active=is.true');
 		assert.deepEqual(
-			parsePostgrest(url.searchParams),
+			parsePostgREST(url.searchParams),
 			filtered(cond(['id'], 'eq', 1), cond(['active'], 'eq', true)),
 		);
 	});
 
 	it('uses URL query decoding for plus and percent escapes', () => {
 		assert.deepEqual(
-			parsePostgrest('message=eq.hello+world%25'),
+			parsePostgREST('message=eq.hello+world%25'),
 			filtered(cond(['message'], 'eq', 'hello world%')),
 		);
 	});
 
 	it('keeps delimiters inside quoted column names', () => {
 		assert.deepEqual(
-			parsePostgrest('%22first.name%22=eq.bob'),
+			parsePostgREST('%22first.name%22=eq.bob'),
 			filtered(cond(['first.name'], 'eq', 'bob')),
 		);
 	});
 
 	it('does not treat a colon inside a quoted select field as an alias', () => {
 		assert.deepEqual(
-			parsePostgrest('select=%22namespace%3Afield%22'),
+			parsePostgREST('select=%22namespace%3Afield%22'),
 			{ select: projection(['namespace:field']) },
 		);
 	});
 
 	it('parses a leading quoted identifier inside a logic tree', () => {
 		assert.deepEqual(
-			parsePostgrest('or=(%22information.cpe%22.eq.x,b.eq.2)'),
+			parsePostgREST('or=(%22information.cpe%22.eq.x,b.eq.2)'),
 			grouped('or', cond(['information.cpe'], 'eq', 'x'), cond(['b'], 'eq', 2)),
 		);
 	});
 
 	it('preserves trailing whitespace in logic-leaf operands', () => {
 		assert.deepEqual(
-			parsePostgrest('or=(name.eq.Bob%20,id.eq.1)'),
+			parsePostgREST('or=(name.eq.Bob%20,id.eq.1)'),
 			grouped('or', cond(['name'], 'eq', 'Bob '), cond(['id'], 'eq', 1)),
 		);
 	});
 
 	it('ignores leading separator whitespace in logic terms', () => {
 		assert.deepEqual(
-			parsePostgrest('or=(a.eq.1,%20and(b.eq.2,c.eq.3))'),
+			parsePostgREST('or=(a.eq.1,%20and(b.eq.2,c.eq.3))'),
 			grouped('or', cond(['a'], 'eq', 1), group('and', cond(['b'], 'eq', 2), cond(['c'], 'eq', 3))),
 		);
 	});
 
 	it('does not interpret a first-segment not column as operator negation', () => {
 		assert.deepEqual(
-			parsePostgrest('or=(not.eq.ab,b.eq.2)'),
+			parsePostgREST('or=(not.eq.ab,b.eq.2)'),
 			grouped('or', cond(['not'], 'eq', 'ab'), cond(['b'], 'eq', 2)),
 		);
 	});
 
 	it('pins PostgREST field-first binding against top-level canonical dotted paths', () => {
 		assert.deepEqual(
-			parsePostgrest('meta.like=eq.5'),
+			parsePostgREST('meta.like=eq.5'),
 			filtered(cond(['meta', 'like'], 'eq', 5)),
 		);
 		assert.deepEqual(
-			parsePostgrest('or=(meta.like.eq.5,b.eq.1)'),
+			parsePostgREST('or=(meta.like.eq.5,b.eq.1)'),
 			grouped('or', cond(['meta'], 'like', 'eq.5'), cond(['b'], 'eq', 1)),
 		);
 	});
 
 	it('combines repeated logic parameters conjunctively', () => {
 		assert.deepEqual(
-			parsePostgrest('or=(a.eq.1,b.eq.2)&or=(c.eq.3,d.eq.4)'),
+			parsePostgREST('or=(a.eq.1,b.eq.2)&or=(c.eq.3,d.eq.4)'),
 			filtered(
 				group('or', cond(['a'], 'eq', 1), cond(['b'], 'eq', 2)),
 				group('or', cond(['c'], 'eq', 3), cond(['d'], 'eq', 4)),
@@ -469,7 +469,7 @@ describe('PostgREST input and shared-model behavior', () => {
 
 	it('allows an unquoted operand to end in a quote character', () => {
 		assert.deepEqual(
-			parsePostgrest('title=eq.The+%22Best%22'),
+			parsePostgREST('title=eq.The+%22Best%22'),
 			filtered(cond(['title'], 'eq', 'The "Best"')),
 		);
 	});
@@ -491,16 +491,16 @@ describe('PostgREST input and shared-model behavior', () => {
 			['value=eq.01', 'value==01'],
 		] as const;
 		for (const [postgrest, core] of equivalentPairs)
-			assert.deepEqual(parsePostgrest(postgrest), parseQuery(core));
+			assert.deepEqual(parsePostgREST(postgrest), parseQuery(core));
 	});
 
 	it('pins the non-finite literal boundary against Core interpretation', () => {
-		assert.deepEqual(parsePostgrest('value=eq.Infinity'), filtered(cond(['value'], 'eq', 'Infinity')));
+		assert.deepEqual(parsePostgREST('value=eq.Infinity'), filtered(cond(['value'], 'eq', 'Infinity')));
 		assert.deepEqual(parseQuery('value==Infinity'), filtered(cond(['value'], 'eq', Infinity)));
 	});
 
 	it('deferred errors never return a partially usable query', () => {
-		const result = parsePostgrest('id=eq.1&limit=5&status=is.unknown', { deferErrors: true });
+		const result = parsePostgREST('id=eq.1&limit=5&status=is.unknown', { deferErrors: true });
 		assert.ok(result.parseError instanceof QueryError);
 		assert.deepEqual(Object.keys(result), ['parseError']);
 	});
@@ -523,63 +523,63 @@ describe('Unsupported PostgREST features', () => {
 
 	for (const [name, search] of unsupported) {
 		it(`${name} throws UnsupportedFeature`, () => {
-			assert.throws(() => parsePostgrest(search), UnsupportedFeature);
+			assert.throws(() => parsePostgREST(search), UnsupportedFeature);
 		});
 	}
 
 	it('drop removes unsupported projection fields only when explicitly requested', () => {
 		assert.deepEqual(
-			parsePostgrest('select=id,display:name', { onUnsupported: 'drop' }),
+			parsePostgREST('select=id,display:name', { onUnsupported: 'drop' }),
 			{ select: projection(['id']) },
 		);
 	});
 
 	it('drop removes only unsupported null placement and preserves the order key', () => {
 		assert.deepEqual(
-			parsePostgrest('order=id,age.desc.nullsfirst', { onUnsupported: 'drop' }),
+			parsePostgREST('order=id,age.desc.nullsfirst', { onUnsupported: 'drop' }),
 			{ sort: [sort(['id']), sort(['age'], 'desc')] },
 		);
 	});
 
 	it('drop cannot erase the entire projection', () => {
 		assert.throws(
-			() => parsePostgrest('select=display:name', { onUnsupported: 'drop' }),
+			() => parsePostgREST('select=display:name', { onUnsupported: 'drop' }),
 			UnsupportedFeature,
 		);
 	});
 
 	it('drop does not discard resource embedding because embedded-filter semantics differ', () => {
 		assert.throws(
-			() => parsePostgrest('select=title,actors(*)&actors.first_name=eq.Jehanne', { onUnsupported: 'drop' }),
+			() => parsePostgREST('select=title,actors(*)&actors.first_name=eq.Jehanne', { onUnsupported: 'drop' }),
 			UnsupportedFeature,
 		);
 	});
 
 	it('drop preserves a sole order key when removing null placement', () => {
 		assert.deepEqual(
-			parsePostgrest('order=age.nullsfirst', { onUnsupported: 'drop' }),
+			parsePostgREST('order=age.nullsfirst', { onUnsupported: 'drop' }),
 			{ sort: [sort(['age'])] },
 		);
 	});
 
 	it('drop never weakens an unsupported filter', () => {
 		assert.throws(
-			() => parsePostgrest('status=is.unknown', { onUnsupported: 'drop' }),
+			() => parsePostgREST('status=is.unknown', { onUnsupported: 'drop' }),
 			UnsupportedFeature,
 		);
 	});
 
 	it('rejects unrepresentable JSON containment as UnsupportedFeature', () => {
-		assert.throws(() => parsePostgrest('metadata=cs.{%22tier%22:%22gold%22}'), UnsupportedFeature);
+		assert.throws(() => parsePostgREST('metadata=cs.{%22tier%22:%22gold%22}'), UnsupportedFeature);
 	});
 
 	it('rejects unrepresentable range containment as UnsupportedFeature', () => {
-		assert.throws(() => parsePostgrest('period=cd.[1,10)'), UnsupportedFeature);
+		assert.throws(() => parsePostgREST('period=cd.[1,10)'), UnsupportedFeature);
 	});
 
 	it('names aggregate projection errors accurately', () => {
 		assert.throws(
-			() => parsePostgrest('select=id,amount.sum()'),
+			() => parsePostgREST('select=id,amount.sum()'),
 			(error: unknown) => error instanceof UnsupportedFeature && error.message.includes('aggregate'),
 		);
 	});
@@ -591,7 +591,7 @@ describe('Unsupported PostgREST features', () => {
 			'select=id,total:amount.sum()::numeric',
 		]) {
 			assert.throws(
-				() => parsePostgrest(search, { onUnsupported: 'drop' }),
+				() => parsePostgREST(search, { onUnsupported: 'drop' }),
 				(error: unknown) => error instanceof UnsupportedFeature && error.message.includes('aggregate'),
 			);
 		}
@@ -599,28 +599,28 @@ describe('Unsupported PostgREST features', () => {
 
 	it('rejects nested any/all operands instead of stringifying them', () => {
 		for (const search of ['value=eq(any).{{1},{2}}', 'value=gt(all).((1),(2))'])
-			assert.throws(() => parsePostgrest(search), UnsupportedFeature);
+			assert.throws(() => parsePostgREST(search), UnsupportedFeature);
 	});
 
 	it('rejects empty lists that would create undefined zero-term groups', () => {
 		for (const search of ['tags=cs.{}', 'value=gt(any).{}', 'value=gt(all).{}'])
-			assert.throws(() => parsePostgrest(search), UnsupportedFeature);
+			assert.throws(() => parsePostgREST(search), UnsupportedFeature);
 	});
 
 	it('retains empty eq(any) as the defined canonical empty in condition', () => {
-		assert.deepEqual(parsePostgrest('value=eq(any).{}'), filtered(cond(['value'], 'in', [])));
+		assert.deepEqual(parsePostgREST('value=eq(any).{}'), filtered(cond(['value'], 'in', [])));
 	});
 
 	it('does not drop related ordering because it changes pagination semantics', () => {
 		assert.throws(
-			() => parsePostgrest('order=directors(last_name).desc', { onUnsupported: 'drop' }),
+			() => parsePostgREST('order=directors(last_name).desc', { onUnsupported: 'drop' }),
 			UnsupportedFeature,
 		);
 	});
 
 	it('classifies an unclosed containment array as syntax, not an unsupported feature', () => {
 		assert.throws(
-			() => parsePostgrest('tags=cs.{red,blue'),
+			() => parsePostgREST('tags=cs.{red,blue'),
 			(error: unknown) => error instanceof QueryError && !(error instanceof UnsupportedFeature),
 		);
 	});
@@ -645,32 +645,32 @@ describe('PostgREST syntax and resource bounds', () => {
 
 	for (const search of hostileInputs) {
 		it(`throws QueryError for ${search}`, () => {
-			assert.throws(() => parsePostgrest(search), QueryError);
+			assert.throws(() => parsePostgREST(search), QueryError);
 		});
 	}
 
 	it('rejects logic nesting beyond the parser depth budget as QueryError', () => {
 		let logic = 'a.eq.1';
 		for (let depth = 0; depth < 40; depth++) logic = `and(${logic})`;
-		assert.throws(() => parsePostgrest(`or=(${logic})`), QueryError);
+		assert.throws(() => parsePostgREST(`or=(${logic})`), QueryError);
 	});
 
 	it('rejects lists beyond the parser value budget as QueryError', () => {
 		const values = Array.from({ length: 1_001 }, (_, index) => String(index)).join(',');
-		assert.throws(() => parsePostgrest(`id=in.(${values})`), QueryError);
+		assert.throws(() => parsePostgREST(`id=in.(${values})`), QueryError);
 	});
 
 	it('applies the parser term budget to projection fields', () => {
 		const fields = Array.from({ length: 1_001 }, (_, index) => `field${index}`).join(',');
-		assert.throws(() => parsePostgrest(`select=${fields}`), QueryError);
+		assert.throws(() => parsePostgREST(`select=${fields}`), QueryError);
 	});
 
 	it('applies the parser term budget to order keys', () => {
 		const keys = Array.from({ length: 1_001 }, (_, index) => `field${index}`).join(',');
-		assert.throws(() => parsePostgrest(`order=${keys}`), QueryError);
+		assert.throws(() => parsePostgREST(`order=${keys}`), QueryError);
 	});
 
 	it('rejects an oversized encoded query before URL decoding', () => {
-		assert.throws(() => parsePostgrest(`message=eq.${'x'.repeat(65_536)}`), QueryError);
+		assert.throws(() => parsePostgREST(`message=eq.${'x'.repeat(65_536)}`), QueryError);
 	});
 });

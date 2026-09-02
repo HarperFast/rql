@@ -5,9 +5,9 @@ import * as root from 'rql';
 
 describe('built PostgREST package surface', () => {
 	it('exports the dialect parser and error from the built subpath', () => {
-		assert.equal(typeof dialect.parsePostgrest, 'function');
+		assert.equal(typeof dialect.parsePostgREST, 'function');
 		assert.ok(dialect.UnsupportedFeature.prototype instanceof root.QueryError);
-		assert.deepEqual(dialect.parsePostgrest('or=(a.eq.1,b.eq.2)&limit=5'), {
+		assert.deepEqual(dialect.parsePostgREST('or=(a.eq.1,b.eq.2)&limit=5'), {
 			filter: {
 				operator: 'or',
 				terms: [
@@ -20,7 +20,7 @@ describe('built PostgREST package surface', () => {
 	});
 
 	it('does not export the dialect from the built Core entry point', () => {
-		assert.equal('parsePostgrest' in root, false);
+		assert.equal('parsePostgREST' in root, false);
 		assert.equal('UnsupportedFeature' in root, false);
 	});
 });

@@ -12,7 +12,7 @@ interface URLSearchParams {
 
 type URLSearchParamsConstructor = new (input?: string) => URLSearchParams;
 
-export interface PostgrestOptions extends ParseOptions {
+export interface PostgRESTOptions extends ParseOptions {
 	onUnsupported?: 'throw' | 'drop';
 }
 
@@ -58,30 +58,186 @@ type ParsedOperator = {
 	operand: string;
 };
 
+// ── Entry point ────────────────────────────────────────────────────────────
+
+/**
+ * Appendix E.4: `neq` uses RQL complement semantics, so absent properties differ from SQL `<>`.
+ */
+export function parsePostgREST(
+	search: string | URLSearchParams, options?: PostgRESTOptions,
+): ParseResult {
+	const result: ParseResult = {};
+	try {
+		let parameters: URLSearchParams;
+		if (typeof search === 'string') {
+			if (search.length > MAX_SEARCH_LENGTH)
+				syntaxViolation(`query exceeds the ${MAX_SEARCH_LENGTH}-character limit`);
+			if (!URL_SEARCH_PARAMS) throw new QueryError('URLSearchParams is unavailable in this runtime');
+			parameters = new URL_SEARCH_PARAMS(search.startsWith('?') ? search.slice(1) : search);
+		} else {
+			parameters = search;
+		}
+		parseInto(result, parameters, options);
+	} catch (error) {
+		if (!(error instanceof QueryError)) throw error;
+		if (!options?.deferErrors) throw error;
+		return { parseError: error };
+	}
+	return result;
+}
+
 function syntaxViolation(message: string): never {
 	throw new SyntaxViolation(`Unable to parse PostgREST query: ${message}`);
 }
 
-function useTerms(budget: ParseBudget, count: number): void {
-	budget.terms += count;
-	if (budget.terms > MAX_TERMS) syntaxViolation(`query exceeds the ${MAX_TERMS}-term limit`);
+// ── Query-parameter dispatch ───────────────────────────────────────────────
+
+function parseInto(
+	result: ParseResult, parameters: URLSearchParams, options: PostgRESTOptions | undefined,
+): void {
+	const terms: Term[] = [];
+	const budget: ParseBudget = { terms: 0 };
+	const seenReserved = new Set<string>();
+	let decodedLength = 0;
+
+	for (const [key, value] of parameters.entries()) {
+		decodedLength += key.length + value.length + 2;
+		if (decodedLength > MAX_SEARCH_LENGTH)
+			syntaxViolation(`query exceeds the ${MAX_SEARCH_LENGTH}-character limit`);
+		if (key === 'select' || key === 'order' || key === 'limit' || key === 'offset') {
+			if (seenReserved.has(key)) syntaxViolation(`duplicate '${key}' parameter`);
+			seenReserved.add(key);
+			if (key === 'select') {
+				const select = parseSelect(value, options, budget);
+				if (select) result.select = select;
+			}
+			else if (key === 'order') result.sort = parseOrder(value, options, budget);
+			else result[key] = parseNonNegativeInteger(value, key);
+		} else if (key === 'or' || key === 'and' || key === 'not.or' || key === 'not.and') {
+			const operator = key.endsWith('or') ? 'or' : 'and';
+			const group = parseLogicGroup(unwrapLogicBody(value), operator, 1, budget);
+			terms.push(key.startsWith('not.') ? negateGroup(group) : group);
+		} else {
+			terms.push(parseFilterValue(splitColumnPath(key), value, budget));
+		}
+	}
+
+	const filter = filterFromTerms(terms);
+	if (filter) result.filter = filter;
 }
 
-function matchingClose(open: string, close: string): boolean {
-	if (open === '{') return close === '}';
-	if (open === '[') return close === ']' || close === ')';
-	return close === ')' || close === ']';
+function filterFromTerms(terms: Term[]): Group | undefined {
+	if (terms.length === 0) return undefined;
+	if (terms.length === 1 && 'terms' in terms[0]) return terms[0];
+	return { operator: 'and', terms };
 }
 
-function splitTopLevel(input: string, maxParts = MAX_TERMS): string[] {
-	const parts: string[] = [];
+// ── select, order, limit, offset ───────────────────────────────────────────
+
+function parseSelect(
+	raw: string, options: PostgRESTOptions | undefined, budget: ParseBudget,
+): Projection | undefined {
+	const fields: Field[] = [];
+	let dropped = false;
+	let wildcard = false;
+	for (const rawField of splitTopLevel(raw)) {
+		const field = rawField.trim();
+		if (!field) syntaxViolation('select contains an empty field');
+		if (field === '*') { wildcard = true; continue; }
+		let feature: string | undefined;
+		if (AGGREGATE_PROJECTION_PATTERN.test(field)) {
+			throw new UnsupportedFeature(`PostgREST feature 'projection aggregate (${field})' is unsupported`);
+		}
+		if (includesUnquoted(field, '::')) feature = `projection cast '${field}'`;
+		else if (includesUnquoted(field, ':')) feature = `projection alias '${field}'`;
+		else if (includesUnquoted(field, '(') || includesUnquoted(field, ')') || includesUnquoted(field, '!')) {
+			throw new UnsupportedFeature(`PostgREST feature 'resource embedding (${field})' is unsupported`);
+		}
+		if (feature) {
+			if (unsupported(feature, options)) { dropped = true; continue; }
+		}
+		useTerms(budget, 1);
+		fields.push({ path: splitColumnPath(field) });
+	}
+	if (wildcard) return undefined;
+	if (fields.length === 0 && dropped)
+		throw new UnsupportedFeature('PostgREST cannot drop every selected field');
+	if (fields.length === 0) syntaxViolation('select cannot be empty');
+	return { mode: 'records', fields };
+}
+
+function parseOrder(
+	raw: string, options: PostgRESTOptions | undefined, budget: ParseBudget,
+): SortKey[] {
+	const keys: SortKey[] = [];
+	for (const rawKey of splitTopLevel(raw)) {
+		let key = rawKey.trim();
+		if (!key) syntaxViolation('order contains an empty key');
+		if (includesUnquoted(key, '(') || includesUnquoted(key, ')'))
+			throw new UnsupportedFeature(`PostgREST feature 'related ordering (${key})' is unsupported`);
+		if (NULL_ORDER_PATTERN.test(key)) {
+			if (unsupported(`null ordering '${key}'`, options)) {
+				key = key.replace(NULL_ORDER_PATTERN, '');
+			}
+		}
+		let direction: 'asc' | 'desc' = 'asc';
+		if (key.endsWith('.asc')) key = key.slice(0, -4);
+		else if (key.endsWith('.desc')) { key = key.slice(0, -5); direction = 'desc'; }
+		useTerms(budget, 1);
+		keys.push({ path: splitColumnPath(key), direction });
+	}
+	if (keys.length === 0) syntaxViolation('order cannot be empty');
+	return keys;
+}
+
+function parseNonNegativeInteger(raw: string, name: string): number {
+	if (!NON_NEGATIVE_INTEGER_PATTERN.test(raw)) syntaxViolation(`${name} must be a non-negative integer`);
+	const value = Number(raw);
+	if (!Number.isSafeInteger(value)) syntaxViolation(`${name} exceeds the safe integer range`);
+	return value;
+}
+
+function unsupported(feature: string, options: PostgRESTOptions | undefined): boolean {
+	if (options?.onUnsupported === 'drop') return true;
+	throw new UnsupportedFeature(`PostgREST feature '${feature}' is unsupported`);
+}
+
+// ── Logic groups ───────────────────────────────────────────────────────────
+
+function unwrapLogicBody(raw: string): string {
+	if (raw.length < 2 || raw[0] !== '(' || raw[raw.length - 1] !== ')')
+		syntaxViolation('logic parameter requires a parenthesized body');
+	return raw.slice(1, -1);
+}
+
+function parseLogicGroup(
+	body: string, operator: 'and' | 'or', depth: number, budget: ParseBudget,
+): Group {
+	if (depth > MAX_LOGIC_DEPTH) syntaxViolation(`logic exceeds the depth limit of ${MAX_LOGIC_DEPTH}`);
+	if (!body) syntaxViolation('logic group cannot be empty');
+	const parts = splitTopLevel(body);
+	if (parts.some((part) => part.trim() === '')) syntaxViolation('logic group contains an empty term');
+	return { operator, terms: parts.map((part) => parseLogicTerm(part, depth, budget)) };
+}
+
+function parseLogicTerm(raw: string, depth: number, budget: ParseBudget): Term {
+	const value = raw.trimStart();
+	const call = LOGIC_CALL_PATTERN.exec(value);
+	if (!call) return parseLogicLeaf(value, budget);
+	if (!value.endsWith(')')) syntaxViolation('unbalanced logic group');
+	const group = parseLogicGroup(
+		value.slice(call[0].length, -1), call[2] as 'and' | 'or', depth + 1, budget,
+	);
+	return call[1] ? negateGroup(group) : group;
+}
+
+function parseLogicLeaf(raw: string, budget: ParseBudget): Term {
+	const candidateIndexes: number[] = [];
 	const stack: string[] = [];
 	let quoted = false;
 	let escaped = false;
-	let start = 0;
-
-	for (let index = 0; index < input.length; index++) {
-		const character = input[index];
+	for (let index = 0; index < raw.length; index++) {
+		const character = raw[index];
 		if (quoted) {
 			if (escaped) escaped = false;
 			else if (character === '\\') escaped = true;
@@ -95,162 +251,24 @@ function splitTopLevel(input: string, maxParts = MAX_TERMS): string[] {
 		} else if (character === ')' || character === ']' || character === '}') {
 			const open = stack.pop();
 			if (!open || !matchingClose(open, character)) syntaxViolation('unbalanced operand delimiter');
-		} else if (character === ',' && stack.length === 0) {
-			if (parts.length >= maxParts) syntaxViolation(`list exceeds the ${maxParts}-item limit`);
-			parts.push(input.slice(start, index));
-			start = index + 1;
+		} else if (character === '.' && index > 0 && stack.length === 0) {
+			candidateIndexes.push(index);
 		}
-	}
-
-	if (quoted) syntaxViolation('unterminated quoted operand');
-	if (stack.length > 0) syntaxViolation('unbalanced operand delimiter');
-	if (parts.length >= maxParts) syntaxViolation(`list exceeds the ${maxParts}-item limit`);
-	parts.push(input.slice(start));
-	return parts;
-}
-
-function includesUnquoted(input: string, token: string): boolean {
-	let quoted = false;
-	let escaped = false;
-	for (let index = 0; index < input.length; index++) {
-		const character = input[index];
-		if (quoted) {
-			if (escaped) escaped = false;
-			else if (character === '\\') escaped = true;
-			else if (character === '"') quoted = false;
-		} else if (character === '"') {
-			quoted = true;
-		} else if (input.startsWith(token, index)) {
-			return true;
-		}
-	}
-	return false;
-}
-
-function decodeQuoted(raw: string): string {
-	if (raw.length < 2 || raw[0] !== '"' || raw[raw.length - 1] !== '"')
-		syntaxViolation('malformed quoted operand');
-	let value = '';
-	for (let index = 1; index < raw.length - 1; index++) {
-		const character = raw[index];
-		if (character === '\\') {
-			index++;
-			if (index >= raw.length - 1) syntaxViolation('malformed quoted operand escape');
-			value += raw[index];
-		} else if (character === '"') {
-			syntaxViolation('unescaped quote inside quoted operand');
-		} else {
-			value += character;
-		}
-	}
-	return value;
-}
-
-function interpretDecodedValue(token: string): Value {
-	if (token === 'null') return null;
-	if (token === 'true') return true;
-	if (token === 'false') return false;
-	const number = +token;
-	if (token !== '' && Number.isFinite(number) && String(number) === token) return number;
-	return token;
-}
-
-function parseOperand(raw: string): Value {
-	if (raw.startsWith('"')) return decodeQuoted(raw);
-	return interpretDecodedValue(raw);
-}
-
-function parseList(raw: string, open: '(' | '{'): Value[] {
-	const close = open === '(' ? ')' : '}';
-	if (raw[0] !== open || raw[raw.length - 1] !== close)
-		syntaxViolation(`operator requires a ${open}${close} value list`);
-	const inner = raw.slice(1, -1);
-	if (inner === '') return [];
-	const parts = splitTopLevel(inner, MAX_LIST_VALUES);
-	return parts.map(parseOperand);
-}
-
-function parseModifierValues(raw: string): Value[] {
-	const open = raw[0];
-	if (open !== '{' && open !== '(') syntaxViolation('any/all modifier requires a value list');
-	const close = open === '{' ? '}' : ')';
-	if (!raw.endsWith(close)) syntaxViolation(`any/all ${open}${close} value list is not closed`);
-	const inner = raw.slice(1, -1);
-	if (['{', '}', '(', ')'].some((token) => includesUnquoted(inner, token)))
-		throw new UnsupportedFeature(`PostgREST any/all operand '${raw}' cannot be represented`);
-	return parseList(raw, open);
-}
-
-function parseContainmentValues(operator: string, raw: string): Value[] {
-	if (!raw.startsWith('{'))
-		throw new UnsupportedFeature(`PostgREST ${operator} operand '${raw}' cannot be represented`);
-	if (!raw.endsWith('}')) syntaxViolation(`${operator} array operand is not closed`);
-	const inner = raw.slice(1, -1);
-	if ((JSON_OBJECT_OPERAND_PATTERN.test(raw) && includesUnquoted(inner, ':'))
-		|| ['{', '}', '(', ')'].some((token) => includesUnquoted(inner, token)))
-		throw new UnsupportedFeature(`PostgREST ${operator} operand '${raw}' cannot be represented`);
-	return parseList(raw, '{');
-}
-
-function splitColumnPath(raw: string): string[] {
-	if (!raw) syntaxViolation('column path is empty');
-	const segments: string[] = [];
-	let quoted = false;
-	let escaped = false;
-	let start = 0;
-	for (let index = 0; index < raw.length; index++) {
-		const character = raw[index];
-		if (quoted) {
-			if (escaped) escaped = false;
-			else if (character === '\\') escaped = true;
-			else if (character === '"') quoted = false;
-			continue;
-		}
-		if (character === '"') {
-			quoted = true;
-			continue;
-		}
-		let delimiterLength = 0;
-		if (character === '.') delimiterLength = 1;
-		else if (raw.startsWith('->>', index)) delimiterLength = 3;
-		else if (raw.startsWith('->', index)) delimiterLength = 2;
-		if (!delimiterLength) continue;
-		const segment = raw.slice(start, index);
-		if (!segment) syntaxViolation('column path contains an empty segment');
-		segments.push(segment.startsWith('"') ? decodeQuoted(segment) : segment);
-		index += delimiterLength - 1;
-		start = index + 1;
 	}
 	if (quoted) syntaxViolation('unterminated quoted column path');
-	const finalSegment = raw.slice(start);
-	if (!finalSegment) syntaxViolation('column path contains an empty segment');
-	segments.push(finalSegment.startsWith('"') ? decodeQuoted(finalSegment) : finalSegment);
-	return segments;
+	if (stack.length > 0) syntaxViolation('unbalanced operand delimiter');
+	for (let candidate = 0; candidate < candidateIndexes.length; candidate++) {
+		const index = candidateIndexes[candidate];
+		const expression = raw.slice(index + 1);
+		const operatorMatch = LOGIC_OPERATOR_PATTERN.exec(expression);
+		if (operatorMatch && OPERATOR_NAMES.has(operatorMatch[1])) {
+			return parseFilterValue(splitColumnPath(raw.slice(0, index)), expression, budget);
+		}
+	}
+	syntaxViolation('logic leaf must have the form column.[not.]operator.operand');
 }
 
-function condition(
-	path: string[], comparator: string, value: Value, negated: boolean, budget: ParseBudget,
-): Condition {
-	useTerms(budget, 1);
-	const result: Condition = { path, comparator, value };
-	if (negated) result.negated = true;
-	return result;
-}
-
-function parseOperator(expression: string): ParsedOperator {
-	const match = FILTER_PATTERN.exec(expression);
-	if (!match) syntaxViolation('filter must have the form [not.]operator.operand');
-	const [, notPrefix, operator, argument, operand] = match;
-	if (!OPERATOR_NAMES.has(operator)) syntaxViolation(`unknown PostgREST operator '${operator}'`);
-	if (argument !== undefined && argument !== 'any' && argument !== 'all' && !CONFIGURABLE_OPERATORS.has(operator))
-		syntaxViolation(`operator '${operator}' does not accept configuration arguments`);
-	if ((argument === 'any' || argument === 'all') && !MODIFIER_OPERATORS.has(operator))
-		syntaxViolation(`operator '${operator}' does not accept the '${argument}' modifier`);
-	if (argument !== undefined && argument !== 'any' && argument !== 'all'
-		&& !CONFIGURATION_ARGUMENT_PATTERN.test(argument))
-		syntaxViolation(`operator '${operator}' has an invalid configuration argument`);
-	return { operator, argument, negated: notPrefix !== undefined, operand };
-}
+// ── Filter terms ───────────────────────────────────────────────────────────
 
 function parseFilterValue(path: string[], expression: string, budget: ParseBudget): Term {
 	const parsed = parseOperator(expression);
@@ -320,19 +338,144 @@ function parseFilterValue(path: string[], expression: string, budget: ParseBudge
 	return term;
 }
 
-function unwrapLogicBody(raw: string): string {
-	if (raw.length < 2 || raw[0] !== '(' || raw[raw.length - 1] !== ')')
-		syntaxViolation('logic parameter requires a parenthesized body');
-	return raw.slice(1, -1);
+function parseOperator(expression: string): ParsedOperator {
+	const match = FILTER_PATTERN.exec(expression);
+	if (!match) syntaxViolation('filter must have the form [not.]operator.operand');
+	const [, notPrefix, operator, argument, operand] = match;
+	if (!OPERATOR_NAMES.has(operator)) syntaxViolation(`unknown PostgREST operator '${operator}'`);
+	if (argument !== undefined && argument !== 'any' && argument !== 'all' && !CONFIGURABLE_OPERATORS.has(operator))
+		syntaxViolation(`operator '${operator}' does not accept configuration arguments`);
+	if ((argument === 'any' || argument === 'all') && !MODIFIER_OPERATORS.has(operator))
+		syntaxViolation(`operator '${operator}' does not accept the '${argument}' modifier`);
+	if (argument !== undefined && argument !== 'any' && argument !== 'all'
+		&& !CONFIGURATION_ARGUMENT_PATTERN.test(argument))
+		syntaxViolation(`operator '${operator}' has an invalid configuration argument`);
+	return { operator, argument, negated: notPrefix !== undefined, operand };
 }
 
-function parseLogicLeaf(raw: string, budget: ParseBudget): Term {
-	const candidateIndexes: number[] = [];
+function condition(
+	path: string[], comparator: string, value: Value, negated: boolean, budget: ParseBudget,
+): Condition {
+	useTerms(budget, 1);
+	const result: Condition = { path, comparator, value };
+	if (negated) result.negated = true;
+	return result;
+}
+
+// ── Operands and value lists ───────────────────────────────────────────────
+
+function parseList(raw: string, open: '(' | '{'): Value[] {
+	const close = open === '(' ? ')' : '}';
+	if (raw[0] !== open || raw[raw.length - 1] !== close)
+		syntaxViolation(`operator requires a ${open}${close} value list`);
+	const inner = raw.slice(1, -1);
+	if (inner === '') return [];
+	const parts = splitTopLevel(inner, MAX_LIST_VALUES);
+	return parts.map(parseOperand);
+}
+
+function parseModifierValues(raw: string): Value[] {
+	const open = raw[0];
+	if (open !== '{' && open !== '(') syntaxViolation('any/all modifier requires a value list');
+	const close = open === '{' ? '}' : ')';
+	if (!raw.endsWith(close)) syntaxViolation(`any/all ${open}${close} value list is not closed`);
+	const inner = raw.slice(1, -1);
+	if (['{', '}', '(', ')'].some((token) => includesUnquoted(inner, token)))
+		throw new UnsupportedFeature(`PostgREST any/all operand '${raw}' cannot be represented`);
+	return parseList(raw, open);
+}
+
+function parseContainmentValues(operator: string, raw: string): Value[] {
+	if (!raw.startsWith('{'))
+		throw new UnsupportedFeature(`PostgREST ${operator} operand '${raw}' cannot be represented`);
+	if (!raw.endsWith('}')) syntaxViolation(`${operator} array operand is not closed`);
+	const inner = raw.slice(1, -1);
+	if ((JSON_OBJECT_OPERAND_PATTERN.test(raw) && includesUnquoted(inner, ':'))
+		|| ['{', '}', '(', ')'].some((token) => includesUnquoted(inner, token)))
+		throw new UnsupportedFeature(`PostgREST ${operator} operand '${raw}' cannot be represented`);
+	return parseList(raw, '{');
+}
+
+function parseOperand(raw: string): Value {
+	if (raw.startsWith('"')) return decodeQuoted(raw);
+	return interpretDecodedValue(raw);
+}
+
+function decodeQuoted(raw: string): string {
+	if (raw.length < 2 || raw[0] !== '"' || raw[raw.length - 1] !== '"')
+		syntaxViolation('malformed quoted operand');
+	let value = '';
+	for (let index = 1; index < raw.length - 1; index++) {
+		const character = raw[index];
+		if (character === '\\') {
+			index++;
+			if (index >= raw.length - 1) syntaxViolation('malformed quoted operand escape');
+			value += raw[index];
+		} else if (character === '"') {
+			syntaxViolation('unescaped quote inside quoted operand');
+		} else {
+			value += character;
+		}
+	}
+	return value;
+}
+
+function interpretDecodedValue(token: string): Value {
+	if (token === 'null') return null;
+	if (token === 'true') return true;
+	if (token === 'false') return false;
+	const number = +token;
+	if (token !== '' && Number.isFinite(number) && String(number) === token) return number;
+	return token;
+}
+
+// ── Lexical and budget helpers ─────────────────────────────────────────────
+
+function splitColumnPath(raw: string): string[] {
+	if (!raw) syntaxViolation('column path is empty');
+	const segments: string[] = [];
+	let quoted = false;
+	let escaped = false;
+	let start = 0;
+	for (let index = 0; index < raw.length; index++) {
+		const character = raw[index];
+		if (quoted) {
+			if (escaped) escaped = false;
+			else if (character === '\\') escaped = true;
+			else if (character === '"') quoted = false;
+			continue;
+		}
+		if (character === '"') {
+			quoted = true;
+			continue;
+		}
+		let delimiterLength = 0;
+		if (character === '.') delimiterLength = 1;
+		else if (raw.startsWith('->>', index)) delimiterLength = 3;
+		else if (raw.startsWith('->', index)) delimiterLength = 2;
+		if (!delimiterLength) continue;
+		const segment = raw.slice(start, index);
+		if (!segment) syntaxViolation('column path contains an empty segment');
+		segments.push(segment.startsWith('"') ? decodeQuoted(segment) : segment);
+		index += delimiterLength - 1;
+		start = index + 1;
+	}
+	if (quoted) syntaxViolation('unterminated quoted column path');
+	const finalSegment = raw.slice(start);
+	if (!finalSegment) syntaxViolation('column path contains an empty segment');
+	segments.push(finalSegment.startsWith('"') ? decodeQuoted(finalSegment) : finalSegment);
+	return segments;
+}
+
+function splitTopLevel(input: string, maxParts = MAX_TERMS): string[] {
+	const parts: string[] = [];
 	const stack: string[] = [];
 	let quoted = false;
 	let escaped = false;
-	for (let index = 0; index < raw.length; index++) {
-		const character = raw[index];
+	let start = 0;
+
+	for (let index = 0; index < input.length; index++) {
+		const character = input[index];
 		if (quoted) {
 			if (escaped) escaped = false;
 			else if (character === '\\') escaped = true;
@@ -346,174 +489,45 @@ function parseLogicLeaf(raw: string, budget: ParseBudget): Term {
 		} else if (character === ')' || character === ']' || character === '}') {
 			const open = stack.pop();
 			if (!open || !matchingClose(open, character)) syntaxViolation('unbalanced operand delimiter');
-		} else if (character === '.' && index > 0 && stack.length === 0) {
-			candidateIndexes.push(index);
+		} else if (character === ',' && stack.length === 0) {
+			if (parts.length >= maxParts) syntaxViolation(`list exceeds the ${maxParts}-item limit`);
+			parts.push(input.slice(start, index));
+			start = index + 1;
 		}
 	}
-	if (quoted) syntaxViolation('unterminated quoted column path');
+
+	if (quoted) syntaxViolation('unterminated quoted operand');
 	if (stack.length > 0) syntaxViolation('unbalanced operand delimiter');
-	for (let candidate = 0; candidate < candidateIndexes.length; candidate++) {
-		const index = candidateIndexes[candidate];
-		const expression = raw.slice(index + 1);
-		const operatorMatch = LOGIC_OPERATOR_PATTERN.exec(expression);
-		if (operatorMatch && OPERATOR_NAMES.has(operatorMatch[1])) {
-			return parseFilterValue(splitColumnPath(raw.slice(0, index)), expression, budget);
+	if (parts.length >= maxParts) syntaxViolation(`list exceeds the ${maxParts}-item limit`);
+	parts.push(input.slice(start));
+	return parts;
+}
+
+function includesUnquoted(input: string, token: string): boolean {
+	let quoted = false;
+	let escaped = false;
+	for (let index = 0; index < input.length; index++) {
+		const character = input[index];
+		if (quoted) {
+			if (escaped) escaped = false;
+			else if (character === '\\') escaped = true;
+			else if (character === '"') quoted = false;
+		} else if (character === '"') {
+			quoted = true;
+		} else if (input.startsWith(token, index)) {
+			return true;
 		}
 	}
-	syntaxViolation('logic leaf must have the form column.[not.]operator.operand');
+	return false;
 }
 
-function parseLogicTerm(raw: string, depth: number, budget: ParseBudget): Term {
-	const value = raw.trimStart();
-	const call = LOGIC_CALL_PATTERN.exec(value);
-	if (!call) return parseLogicLeaf(value, budget);
-	if (!value.endsWith(')')) syntaxViolation('unbalanced logic group');
-	const group = parseLogicGroup(
-		value.slice(call[0].length, -1), call[2] as 'and' | 'or', depth + 1, budget,
-	);
-	return call[1] ? negateGroup(group) : group;
+function matchingClose(open: string, close: string): boolean {
+	if (open === '{') return close === '}';
+	if (open === '[') return close === ']' || close === ')';
+	return close === ')' || close === ']';
 }
 
-function parseLogicGroup(
-	body: string, operator: 'and' | 'or', depth: number, budget: ParseBudget,
-): Group {
-	if (depth > MAX_LOGIC_DEPTH) syntaxViolation(`logic exceeds the depth limit of ${MAX_LOGIC_DEPTH}`);
-	if (!body) syntaxViolation('logic group cannot be empty');
-	const parts = splitTopLevel(body);
-	if (parts.some((part) => part.trim() === '')) syntaxViolation('logic group contains an empty term');
-	return { operator, terms: parts.map((part) => parseLogicTerm(part, depth, budget)) };
-}
-
-function unsupported(feature: string, options: PostgrestOptions | undefined): boolean {
-	if (options?.onUnsupported === 'drop') return true;
-	throw new UnsupportedFeature(`PostgREST feature '${feature}' is unsupported`);
-}
-
-function parseSelect(
-	raw: string, options: PostgrestOptions | undefined, budget: ParseBudget,
-): Projection | undefined {
-	const fields: Field[] = [];
-	let dropped = false;
-	let wildcard = false;
-	for (const rawField of splitTopLevel(raw)) {
-		const field = rawField.trim();
-		if (!field) syntaxViolation('select contains an empty field');
-		if (field === '*') { wildcard = true; continue; }
-		let feature: string | undefined;
-		if (AGGREGATE_PROJECTION_PATTERN.test(field)) {
-			throw new UnsupportedFeature(`PostgREST feature 'projection aggregate (${field})' is unsupported`);
-		}
-		if (includesUnquoted(field, '::')) feature = `projection cast '${field}'`;
-		else if (includesUnquoted(field, ':')) feature = `projection alias '${field}'`;
-		else if (includesUnquoted(field, '(') || includesUnquoted(field, ')') || includesUnquoted(field, '!')) {
-			throw new UnsupportedFeature(`PostgREST feature 'resource embedding (${field})' is unsupported`);
-		}
-		if (feature) {
-			if (unsupported(feature, options)) { dropped = true; continue; }
-		}
-		useTerms(budget, 1);
-		fields.push({ path: splitColumnPath(field) });
-	}
-	if (wildcard) return undefined;
-	if (fields.length === 0 && dropped)
-		throw new UnsupportedFeature('PostgREST cannot drop every selected field');
-	if (fields.length === 0) syntaxViolation('select cannot be empty');
-	return { mode: 'records', fields };
-}
-
-function parseOrder(
-	raw: string, options: PostgrestOptions | undefined, budget: ParseBudget,
-): SortKey[] {
-	const keys: SortKey[] = [];
-	for (const rawKey of splitTopLevel(raw)) {
-		let key = rawKey.trim();
-		if (!key) syntaxViolation('order contains an empty key');
-		if (includesUnquoted(key, '(') || includesUnquoted(key, ')'))
-			throw new UnsupportedFeature(`PostgREST feature 'related ordering (${key})' is unsupported`);
-		if (NULL_ORDER_PATTERN.test(key)) {
-			if (unsupported(`null ordering '${key}'`, options)) {
-				key = key.replace(NULL_ORDER_PATTERN, '');
-			}
-		}
-		let direction: 'asc' | 'desc' = 'asc';
-		if (key.endsWith('.asc')) key = key.slice(0, -4);
-		else if (key.endsWith('.desc')) { key = key.slice(0, -5); direction = 'desc'; }
-		useTerms(budget, 1);
-		keys.push({ path: splitColumnPath(key), direction });
-	}
-	if (keys.length === 0) syntaxViolation('order cannot be empty');
-	return keys;
-}
-
-function parseNonNegativeInteger(raw: string, name: string): number {
-	if (!NON_NEGATIVE_INTEGER_PATTERN.test(raw)) syntaxViolation(`${name} must be a non-negative integer`);
-	const value = Number(raw);
-	if (!Number.isSafeInteger(value)) syntaxViolation(`${name} exceeds the safe integer range`);
-	return value;
-}
-
-function filterFromTerms(terms: Term[]): Group | undefined {
-	if (terms.length === 0) return undefined;
-	if (terms.length === 1 && 'terms' in terms[0]) return terms[0];
-	return { operator: 'and', terms };
-}
-
-function parseInto(
-	result: ParseResult, parameters: URLSearchParams, options: PostgrestOptions | undefined,
-): void {
-	const terms: Term[] = [];
-	const budget: ParseBudget = { terms: 0 };
-	const seenReserved = new Set<string>();
-	let decodedLength = 0;
-
-	for (const [key, value] of parameters.entries()) {
-		decodedLength += key.length + value.length + 2;
-		if (decodedLength > MAX_SEARCH_LENGTH)
-			syntaxViolation(`query exceeds the ${MAX_SEARCH_LENGTH}-character limit`);
-		if (key === 'select' || key === 'order' || key === 'limit' || key === 'offset') {
-			if (seenReserved.has(key)) syntaxViolation(`duplicate '${key}' parameter`);
-			seenReserved.add(key);
-			if (key === 'select') {
-				const select = parseSelect(value, options, budget);
-				if (select) result.select = select;
-			}
-			else if (key === 'order') result.sort = parseOrder(value, options, budget);
-			else result[key] = parseNonNegativeInteger(value, key);
-		} else if (key === 'or' || key === 'and' || key === 'not.or' || key === 'not.and') {
-			const operator = key.endsWith('or') ? 'or' : 'and';
-			const group = parseLogicGroup(unwrapLogicBody(value), operator, 1, budget);
-			terms.push(key.startsWith('not.') ? negateGroup(group) : group);
-		} else {
-			terms.push(parseFilterValue(splitColumnPath(key), value, budget));
-		}
-	}
-
-	const filter = filterFromTerms(terms);
-	if (filter) result.filter = filter;
-}
-
-/**
- * Appendix E.4: `neq` uses RQL complement semantics, so absent properties differ from SQL `<>`.
- */
-export function parsePostgrest(
-	search: string | URLSearchParams, options?: PostgrestOptions,
-): ParseResult {
-	const result: ParseResult = {};
-	try {
-		let parameters: URLSearchParams;
-		if (typeof search === 'string') {
-			if (search.length > MAX_SEARCH_LENGTH)
-				syntaxViolation(`query exceeds the ${MAX_SEARCH_LENGTH}-character limit`);
-			if (!URL_SEARCH_PARAMS) throw new QueryError('URLSearchParams is unavailable in this runtime');
-			parameters = new URL_SEARCH_PARAMS(search.startsWith('?') ? search.slice(1) : search);
-		} else {
-			parameters = search;
-		}
-		parseInto(result, parameters, options);
-	} catch (error) {
-		if (!(error instanceof QueryError)) throw error;
-		if (!options?.deferErrors) throw error;
-		return { parseError: error };
-	}
-	return result;
+function useTerms(budget: ParseBudget, count: number): void {
+	budget.terms += count;
+	if (budget.terms > MAX_TERMS) syntaxViolation(`query exceeds the ${MAX_TERMS}-term limit`);
 }
