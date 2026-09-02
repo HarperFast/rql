@@ -33,6 +33,8 @@ export class ReferenceRunner {
 	#nextId = 0;
 	/** Set once the worker cannot be replaced; every later parse then fails fast. */
 	#dead: string | undefined;
+	/** Held for the whole of a parse, restart included — see `parse`. */
+	#busy = false;
 
 
 	constructor(options: ReferenceRunnerOptions) {
@@ -114,14 +116,17 @@ export class ReferenceRunner {
 	 * way to speed the corpus up is to stop awaiting each parse — run several runners instead.
 	 */
 	parse(query: string): Promise<ReferenceOutcomes> {
-		if (this.#pending.size > 0)
-			throw new Error('ReferenceRunner.parse is single-flight; use one runner per concurrent parse');
+		// The flag is held until the returned promise settles, not merely while the request is
+		// pending: a timed-out parse spends its last stretch restarting the worker with nothing
+		// pending, and that window is exactly when a second caller would corrupt the state.
+		if (this.#busy) throw new Error('ReferenceRunner.parse is single-flight; use one runner per concurrent parse');
 		if (this.#dead) return Promise.resolve(both({ status: 'harness-error', error: this.#dead }));
 		const child = this.#child;
 		if (!child) return Promise.resolve(both({ status: 'harness-error', error: 'the reference worker was never started' }));
 
+		this.#busy = true;
 		const id = this.#nextId++;
-		return new Promise((resolve) => {
+		const done = new Promise<ReferenceOutcomes>((resolve) => {
 			const timer = setTimeout(() => {
 				this.#pending.delete(id);
 				child.kill('SIGKILL');
@@ -133,6 +138,9 @@ export class ReferenceRunner {
 			}, this.#options.timeoutMs);
 			this.#pending.set(id, { resolve, timer });
 			child.send({ type: 'parse', id, query });
+		});
+		return done.finally(() => {
+			this.#busy = false;
 		});
 	}
 
