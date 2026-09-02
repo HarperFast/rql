@@ -494,6 +494,11 @@ describe('PostgREST input and shared-model behavior', () => {
 			assert.deepEqual(parsePostgrest(postgrest), parseQuery(core));
 	});
 
+	it('pins the non-finite literal boundary against Core interpretation', () => {
+		assert.deepEqual(parsePostgrest('value=eq.Infinity'), filtered(cond(['value'], 'eq', 'Infinity')));
+		assert.deepEqual(parseQuery('value==Infinity'), filtered(cond(['value'], 'eq', Infinity)));
+	});
+
 	it('deferred errors never return a partially usable query', () => {
 		const result = parsePostgrest('id=eq.1&limit=5&status=is.unknown', { deferErrors: true });
 		assert.ok(result.parseError instanceof QueryError);
@@ -577,6 +582,24 @@ describe('Unsupported PostgREST features', () => {
 			() => parsePostgrest('select=id,amount.sum()'),
 			(error: unknown) => error instanceof UnsupportedFeature && error.message.includes('aggregate'),
 		);
+	});
+
+	it('never drops aliased or cast aggregate projections', () => {
+		for (const search of [
+			'select=id,total:amount.sum()',
+			'select=id,amount.sum()::numeric',
+			'select=id,total:amount.sum()::numeric',
+		]) {
+			assert.throws(
+				() => parsePostgrest(search, { onUnsupported: 'drop' }),
+				(error: unknown) => error instanceof UnsupportedFeature && error.message.includes('aggregate'),
+			);
+		}
+	});
+
+	it('rejects nested any/all operands instead of stringifying them', () => {
+		for (const search of ['value=eq(any).{{1},{2}}', 'value=gt(all).((1),(2))'])
+			assert.throws(() => parsePostgrest(search), UnsupportedFeature);
 	});
 
 	it('does not drop related ordering because it changes pagination semantics', () => {

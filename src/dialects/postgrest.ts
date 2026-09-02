@@ -43,7 +43,7 @@ const NULL_ORDER_PATTERN = /(?:^|\.)(?:nullsfirst|nullslast)$/;
 const NON_NEGATIVE_INTEGER_PATTERN = /^(?:0|[1-9][0-9]*)$/;
 const CONFIGURATION_ARGUMENT_PATTERN = /^[a-z_][a-z0-9_$]*$/i;
 const JSON_OBJECT_OPERAND_PATTERN = /^\{\s*"/;
-const AGGREGATE_PROJECTION_PATTERN = /\.(?:sum|avg|count|min|max)\(\)$/;
+const AGGREGATE_PROJECTION_PATTERN = /(?:^|[.:])(?:sum|avg|count|min|max)\(\)(?=$|::)/;
 
 const URL_SEARCH_PARAMS = (globalThis as unknown as {
 	URLSearchParams?: URLSearchParamsConstructor;
@@ -171,9 +171,14 @@ function parseList(raw: string, open: '(' | '{'): Value[] {
 }
 
 function parseModifierValues(raw: string): Value[] {
-	if (raw.startsWith('{')) return parseList(raw, '{');
-	if (raw.startsWith('(')) return parseList(raw, '(');
-	syntaxViolation('any/all modifier requires a value list');
+	const open = raw[0];
+	if (open !== '{' && open !== '(') syntaxViolation('any/all modifier requires a value list');
+	const close = open === '{' ? '}' : ')';
+	if (!raw.endsWith(close)) syntaxViolation(`any/all ${open}${close} value list is not closed`);
+	const inner = raw.slice(1, -1);
+	if (['{', '}', '(', ')'].some((token) => includesUnquoted(inner, token)))
+		throw new UnsupportedFeature(`PostgREST any/all operand '${raw}' cannot be represented`);
+	return parseList(raw, open);
 }
 
 function parseContainmentValues(operator: string, raw: string): Value[] {
@@ -389,11 +394,11 @@ function parseSelect(
 		if (!field) syntaxViolation('select contains an empty field');
 		if (field === '*') { wildcard = true; continue; }
 		let feature: string | undefined;
-		if (includesUnquoted(field, '::')) feature = `projection cast '${field}'`;
-		else if (includesUnquoted(field, ':')) feature = `projection alias '${field}'`;
-		else if (AGGREGATE_PROJECTION_PATTERN.test(field)) {
+		if (AGGREGATE_PROJECTION_PATTERN.test(field)) {
 			throw new UnsupportedFeature(`PostgREST feature 'projection aggregate (${field})' is unsupported`);
 		}
+		if (includesUnquoted(field, '::')) feature = `projection cast '${field}'`;
+		else if (includesUnquoted(field, ':')) feature = `projection alias '${field}'`;
 		else if (includesUnquoted(field, '(') || includesUnquoted(field, ')') || includesUnquoted(field, '!')) {
 			throw new UnsupportedFeature(`PostgREST feature 'resource embedding (${field})' is unsupported`);
 		}
