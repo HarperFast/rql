@@ -15,10 +15,18 @@
 	],
 	"scripts": {
 		"build": "tsc",
-		"test": "node --experimental-strip-types --test test/v2/parse.test.ts",
-		"typecheck": "tsc --noEmit"
+		"test": "npm run test:parser && npm run test:conformance",
+		"test:parser": "node --experimental-strip-types --test test/v2/parse.test.ts",
+		"test:conformance": "node --experimental-strip-types --test \"test/conformance/*.test.ts\"",
+		"typecheck": "tsc --noEmit",
+		"typecheck:conformance": "tsc --noEmit -p conformance/tsconfig.json",
+		"conformance": "node scripts/conformance-diff.mjs",
+		"conformance:record": "node scripts/conformance-diff.mjs --record",
+		"conformance:check": "node scripts/conformance-diff.mjs --check",
+		"conformance:refresh-ledger": "node scripts/refresh-ledger.mjs"
 	},
 	"devDependencies": {
+		"@types/node": "24.13.3",
 		"typescript": "^5.8.0"
 	}
 }

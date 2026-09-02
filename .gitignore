@@ -1,3 +1,5 @@
 downloaded-modules
 node_modules
 npm-debug.log
+conformance/*.actual
+conformance/*.tmp
