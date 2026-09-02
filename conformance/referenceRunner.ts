@@ -1,10 +1,9 @@
 /**
  * Supervises the out-of-process reference parser.
  *
- * Every path settles the request it was given: a parse that never returns becomes `timeout`,
- * and a worker that dies, will not start, or cannot be replaced becomes `harness-error` —
- * neither of which `classify` will treat as agreement. A promise left unsettled here would
- * hang the whole corpus instead.
+ * Two invariants: every request settles — a parse that never returns becomes `timeout`, a
+ * worker that dies or cannot be replaced becomes `harness-error`, and neither counts as
+ * agreement — and only one parse may be in flight at a time (see `parse`).
  */
 
 import { type ChildProcess, fork } from 'node:child_process';
@@ -106,8 +105,17 @@ export class ReferenceRunner {
 		await this.#spawn();
 	}
 
-	/** On a timeout the worker is killed and replaced, so a wedged case costs only that case. */
+	/**
+	 * On a timeout the worker is killed and replaced, so a wedged case costs only that case.
+	 *
+	 * SINGLE-FLIGHT. Replacing the worker discards the pending set with it, so a second
+	 * concurrent parse would be resolved from its own timer as a spurious timeout and would
+	 * replace the worker again. That is enforced rather than documented, because the natural
+	 * way to speed the corpus up is to stop awaiting each parse — run several runners instead.
+	 */
 	parse(query: string): Promise<ReferenceOutcomes> {
+		if (this.#pending.size > 0)
+			throw new Error('ReferenceRunner.parse is single-flight; use one runner per concurrent parse');
 		if (this.#dead) return Promise.resolve(both({ status: 'harness-error', error: this.#dead }));
 		const child = this.#child;
 		if (!child) return Promise.resolve(both({ status: 'harness-error', error: 'the reference worker was never started' }));

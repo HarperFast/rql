@@ -81,7 +81,9 @@ disagreement.
 - `conformance/classify.ts` — the residual filter and the ordered rule set.
 - `conformance/compare.ts` — run assembly, shared by the runner and the tests.
 - `conformance/referenceRunner.ts` — worker supervision; a separate module so its crash windows
-  can be tested against deliberately broken workers.
+  can be tested against deliberately broken workers. It is single-flight by construction:
+  replacing a timed-out worker discards the pending set, so a second concurrent parse would
+  resolve as a spurious timeout. Parallelism belongs one level up, in more runners.
 - `conformance/report.ts` — Markdown rendering from committed data only.
 - `scripts/conformance-diff.mjs` — the CLI; `scripts/conformance-record-worker.mjs` and
   `scripts/conformance-ref-worker.mjs` — the two process boundaries;
