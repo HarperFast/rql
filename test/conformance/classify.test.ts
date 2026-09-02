@@ -76,6 +76,21 @@ describe('classify', () => {
 		assert.deepEqual(verdict, { verdict: 'unclassified' });
 	});
 
+	it('NEGATIVE CONTROL: a pinned witness query is NOT classified when a parse was not observed', () => {
+		// `harper-limit-arguments-unvalidated` names `limit(x)` and matches on the query alone.
+		// Were an unobserved outcome allowed through, a timed-out reference parse would be
+		// reported as that divergence and the run would pass having compared nothing.
+		for (const unobserved of [
+			{ status: 'timeout', ms: 5000 } as Outcome,
+			{ status: 'harness-error', error: 'the reference worker exited (code 1, signal null)' } as Outcome,
+			{ status: 'adapter-gap', error: 'unsupported select shape' } as Outcome,
+		]) {
+			const item = { ...CASE, query: 'limit(x)', features: ['limit', 'adversarial'] };
+			assert.deepEqual(classify(comparison({ case: item, ref: unobserved, harper: parsed })), { verdict: 'unclassified' });
+			assert.deepEqual(classify(comparison({ case: item, ref: parsed, harper: unobserved })), { verdict: 'unclassified' });
+		}
+	});
+
 	it('never calls an unobserved parse agreement, on either side', () => {
 		const timeout: Outcome = { status: 'timeout', ms: 5000 };
 		assert.deepEqual(classify(comparison({ case: { ...CASE, query: 'x=1', features: [] }, ref: timeout, harper: timeout })), {

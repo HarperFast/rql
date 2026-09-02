@@ -306,6 +306,17 @@ describe('harper adapter — errors', () => {
 		assert.equal((outcome as { partial: ParseResult }).partial.filter?.terms.length, 1);
 	});
 
+	it('raises AdapterError for a KNOWN field carrying an unknown shape or value', () => {
+		// Guessing here would let the harness compare a fabricated result — and possibly report
+		// agreement — the first time Harper changes one of these structures.
+		assert.throws(() => adaptHarperResult({ conditions: { nope: true } }), AdapterError);
+		assert.throws(() => adaptHarperResult(query({ conditions: [{ comparator: 'eq', attribute: 'a', value: '1' }], operator: 'xor' })), AdapterError);
+		assert.throws(() => adaptHarperResult(query({ conditions: [{ comparator: 'eq', attribute: 'a', value: '1', negated: 'yes' }] })), AdapterError);
+		assert.throws(() => adaptHarperResult(query({ conditions: [{ comparator: 'eq', attribute: 'a', value: '1', chainedConditions: 'nope' }] })), AdapterError);
+		assert.throws(() => adaptHarperResult(query({ sort: { attribute: 'a', descending: 'yes' } })), AdapterError);
+		assert.throws(() => adaptHarperResult(query({ select: Object.assign(['a'], { asArray: 'yes' }) })), AdapterError);
+	});
+
 	it('raises AdapterError rather than guessing at a shape it does not know', () => {
 		assert.throws(() => adaptHarperResult(42), AdapterError);
 		assert.throws(() => adaptHarperResult(query({ conditions: [{ nonsense: true }] })), AdapterError);
