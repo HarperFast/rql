@@ -105,13 +105,13 @@ describe('ReferenceRunner — failure paths', () => {
 	});
 
 	it('reports a timeout AND marks itself dead when the replacement cannot start', async () => {
-		// Answers nothing, and deletes itself so the restart has no script to fork.
-		const path = stub(
-			'vanishes.mjs',
-			`import { rmSync } from 'node:fs';\nprocess.on('message', () => rmSync(new URL(import.meta.url)));\nprocess.send({ type: 'ready' });\n`
-		);
+		const path = stub('goes-missing.mjs', `process.on('message', () => {});\nprocess.send({ type: 'ready' });\n`);
 		const runner = new ReferenceRunner({ workerPath: path, timeoutMs: 300, startupTimeoutMs: 1000, stderr: 'ignore' });
 		await runner.start();
+		// Removed from the PARENT, after the worker is up: having the child delete its own
+		// script inside the parse handler races the timeout, and under a loaded test runner the
+		// restart can win and find the file still there.
+		rmSync(path);
 		const first = await withDeadline(runner.parse('a=1'), 10_000, 'a parse whose replacement cannot start');
 		assert.equal(first.strict.status, 'timeout');
 		assert.match(runner.deadReason ?? '', /could not be restarted/);

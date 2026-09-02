@@ -35,6 +35,7 @@ import { fileURLToPath } from 'node:url';
 
 import { CORPUS, corpusDigest } from '../conformance/corpus.ts';
 import { buildRun } from '../conformance/compare.ts';
+import { wasObserved } from '../conformance/classify.ts';
 import { ReferenceRunner } from '../conformance/referenceRunner.ts';
 import { renderReport } from '../conformance/report.ts';
 
@@ -263,13 +264,29 @@ async function replay() {
 	// an unclassified divergence must not first clobber the last good report on its way out.
 	if (unclassified.length > 0) {
 		writeFileSync(`${options.out}.actual`, report);
-		process.stderr.write(`\n${unclassified.length} divergence(s) are unclassified. Add a rule in conformance/classify.ts:\n`);
-		for (const comparison of unclassified.slice(0, 40))
+		// Two very different causes land in the same bucket, and telling an operator to write a
+		// classification rule for a case where a parser was never observed sends them the wrong way.
+		const unobserved = unclassified.filter((c) => !wasObserved(c.ref) || !wasObserved(c.harper));
+		const undiagnosed = unclassified.filter((c) => wasObserved(c.ref) && wasObserved(c.harper));
+		const list = (group) => {
+			for (const comparison of group.slice(0, 20))
+				process.stderr.write(
+					`  ${JSON.stringify(comparison.case.query)}  ref=${comparison.ref.status} harper=${comparison.harper.status}` +
+						`${comparison.differences.length ? ` diffs=${comparison.differences.map((difference) => difference.at || '/').join(',')}` : ''}\n`
+				);
+			if (group.length > 20) process.stderr.write(`  … and ${group.length - 20} more\n`);
+		};
+		if (unobserved.length > 0) {
 			process.stderr.write(
-				`  ${JSON.stringify(comparison.case.query)}  ref=${comparison.ref.status} harper=${comparison.harper.status}` +
-					`${comparison.differences.length ? ` diffs=${comparison.differences.map((difference) => difference.at || '/').join(',')}` : ''}\n`
+				`\n${unobserved.length} case(s) were never compared — a parser timed out, the adapter could not map the\n` +
+					`result, or the harness itself failed. No classification rule can cover these; fix the run:\n`
 			);
-		if (unclassified.length > 40) process.stderr.write(`  … and ${unclassified.length - 40} more\n`);
+			list(unobserved);
+		}
+		if (undiagnosed.length > 0) {
+			process.stderr.write(`\n${undiagnosed.length} divergence(s) are unclassified. Add a rule in conformance/classify.ts:\n`);
+			list(undiagnosed);
+		}
 		fail(`${options.out} was left unchanged; the run that could not be classified is in ${options.out}.actual.`, 1);
 	}
 

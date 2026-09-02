@@ -77,20 +77,26 @@ export class ReferenceRunner {
 		child.on('error', (error) => onGone(`the reference worker failed to run: ${error.message}`));
 
 		await new Promise<void>((ready, reject) => {
+			// Every failure kills the child. A worker that merely missed its startup budget is
+			// still running, and leaving it alive orphans a process AND lets a late `ready`
+			// revive a worker the caller has already written off as dead.
+			const fail = (error: Error): void => {
+				clearTimeout(timer);
+				child.kill('SIGKILL');
+				reject(error);
+			};
 			const timer = setTimeout(
-				() => reject(new Error(`the reference worker did not start within ${this.#options.startupTimeoutMs}ms`)),
+				() => fail(new Error(`the reference worker did not start within ${this.#options.startupTimeoutMs}ms`)),
 				this.#options.startupTimeoutMs
 			);
-			const settle = (finish: () => void): void => {
+			child.once('message', (message: { type?: string }) => {
+				if (message?.type !== 'ready') return fail(new Error('the reference worker sent no ready message'));
 				clearTimeout(timer);
-				finish();
-			};
-			child.once('message', (message: { type?: string }) =>
-				settle(() => (message?.type === 'ready' ? ready() : reject(new Error('the reference worker sent no ready message'))))
-			);
-			child.once('error', (error) => settle(() => reject(error)));
+				ready();
+			});
+			child.once('error', (error) => fail(error));
 			child.once('exit', (code, signal) =>
-				settle(() => reject(new Error(`the reference worker exited before starting (code ${code}, signal ${signal})`)))
+				fail(new Error(`the reference worker exited before starting (code ${code}, signal ${signal})`))
 			);
 		});
 		this.#dead = undefined;

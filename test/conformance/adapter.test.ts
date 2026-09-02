@@ -325,6 +325,10 @@ describe('harper adapter — errors', () => {
 		target.conditions = [];
 		target.groupBy = ['a'];
 		assert.throws(() => adaptHarperResult(target), /unknown parse-result member/);
+		// …including on the fast path, where there are no conditions to walk at all.
+		const fastPath = new URLSearchParams('a=1') as URLSearchParams & Record<string, unknown>;
+		fastPath.groupBy = ['a'];
+		assert.throws(() => adaptHarperResult(fastPath), /unknown parse-result member/);
 	});
 
 	it('ignores the RequestTarget plumbing that carries no query semantics', () => {

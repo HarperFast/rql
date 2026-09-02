@@ -311,7 +311,10 @@ export function adaptHarperResult(raw: unknown): HarperOutcome {
 		// A RequestTarget is a URLSearchParams that ALSO carries the parsed query when the
 		// parsing path ran (the dual shape of ledger row 1).
 		const carrier = raw as unknown as Dict;
-		if (carrier.conditions === undefined) return finish(adaptSearchParams(raw), carrier);
+		if (carrier.conditions === undefined) {
+			assertKnownMembers(carrier);
+			return finish(adaptSearchParams(raw), carrier);
+		}
 		return finish(adaptQueryBody(carrier), carrier);
 	}
 	if (!isDict(raw)) throw new AdapterError(`unsupported parse result: ${String(raw)}`);
