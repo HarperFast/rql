@@ -132,6 +132,21 @@ describe('ReferenceRunner — failure paths', () => {
 		runner.stop();
 	});
 
+	it('refuses a second concurrent parse rather than resolving one of them spuriously', async () => {
+		const path = stub('slow.mjs', `process.on('message', (m) => setTimeout(() => process.send({ type: 'result', id: m.id, strict: { status: 'parsed', canonical: {} }, deferred: { status: 'parsed', canonical: {} } }), 50));\nprocess.send({ type: 'ready' });\n`);
+		const runner = new ReferenceRunner({ workerPath: path, ...options });
+		await runner.start();
+		try {
+			const inFlight = runner.parse('a=1');
+			assert.throws(() => runner.parse('b=2'), /single-flight/);
+			assert.equal((await withDeadline(inFlight, 10_000, 'the first parse')).strict.status, 'parsed');
+			// …and the guard lifts once nothing is pending.
+			assert.equal((await withDeadline(runner.parse('c=3'), 10_000, 'a later parse')).strict.status, 'parsed');
+		} finally {
+			runner.stop();
+		}
+	});
+
 	it('does not hang when asked to parse before it was started', async () => {
 		const runner = new ReferenceRunner({ workerPath: REAL_WORKER, ...options });
 		const outcomes = await withDeadline(runner.parse('a=1'), 5_000, 'a parse before start()');
