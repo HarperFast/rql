@@ -560,7 +560,9 @@ const VALUE_MODE_CLASSIFICATION: Extract<Classification, { verdict: 'new' }> = {
  */
 const OBSERVED_STATUSES: ReadonlySet<string> = new Set(['parsed', 'rejected', 'deferred-error']);
 
-const wasObserved = (outcome: Outcome): boolean => OBSERVED_STATUSES.has(outcome.status);
+/** Whether a parser was actually observed for this outcome (as opposed to timing out, or
+ *  failing inside the harness). */
+export const wasObserved = (outcome: Outcome): boolean => OBSERVED_STATUSES.has(outcome.status);
 
 export function classify(comparison: Comparison): Classification {
 	// An unobserved parse must never reach the rules. Several rules are pinned to witness
