@@ -110,7 +110,7 @@ export function renderReport(run: RunResult): string {
 	write(`| Harper commit | ${code(provenance.harper.commit)}${provenance.harper.describe ? ` (${escapeCell(provenance.harper.describe)})` : ''}${provenance.harper.dirty ? ' **+ uncommitted changes**' : ''} |`);
 	write(`| Harper version | ${provenance.harper.version ? code(provenance.harper.version) : '_unknown_'} |`);
 	write(
-		`| Reference parser commit | ${code(provenance.reference.commit)}${provenance.reference.describe ? ` (${escapeCell(provenance.reference.describe)})` : ''}${provenance.reference.dirty ? ' **+ uncommitted changes**' : ''} |`
+		`| Reference parser at recording | ${code(provenance.reference.commit)}${provenance.reference.describe ? ` (${escapeCell(provenance.reference.describe)})` : ''}${provenance.reference.dirty ? ' **+ uncommitted changes**' : ''} |`
 	);
 	write(`| Fixture recorded | ${provenance.recordedAt} |`);
 	write(`| Recorded on Node | ${code(provenance.node)} |`);
@@ -123,6 +123,12 @@ export function renderReport(run: RunResult): string {
 	write();
 	write('The ledger snapshot is a cache. [' + escapeCell(`${ledger.source.repo}#${ledger.source.issue}`) + '](' + ledger.source.url + ') stays canonical —');
 	write('refresh with `npm run conformance:refresh-ledger` before trusting a classification.');
+	write();
+	write('Harper’s side of every comparison below is the recorded fixture, so it is exactly the');
+	write('commit named above. The reference side is parsed live at replay time by the parser in the');
+	write('working tree, which the row above dates only as of the recording: change `src/` and');
+	write('`npm run conformance:check` fails until the report is regenerated, and');
+	write('`npm run conformance:record` re-stamps the row.');
 	write();
 
 	write('## Totals');
