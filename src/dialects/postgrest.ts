@@ -42,9 +42,11 @@ const LOGIC_CALL_PATTERN = /^(not\.)?(and|or)\(/;
 const NULL_ORDER_PATTERN = /(?:^|\.)(?:nullsfirst|nullslast)$/;
 const NON_NEGATIVE_INTEGER_PATTERN = /^(?:0|[1-9][0-9]*)$/;
 const CONFIGURATION_ARGUMENT_PATTERN = /^[a-z_][a-z0-9_$]*$/i;
+const JSON_OBJECT_OPERAND_PATTERN = /^\{\s*"/;
+const AGGREGATE_PROJECTION_PATTERN = /\.(?:sum|avg|count|min|max)\(\)$/;
 
 const URL_SEARCH_PARAMS = (globalThis as unknown as {
-	URLSearchParams: URLSearchParamsConstructor;
+	URLSearchParams?: URLSearchParamsConstructor;
 }).URLSearchParams;
 
 type ParseBudget = { terms: number };
@@ -149,7 +151,7 @@ function interpretDecodedValue(token: string): Value {
 	if (token === 'true') return true;
 	if (token === 'false') return false;
 	const number = +token;
-	if (token !== '' && !isNaN(number) && String(number) === token) return number;
+	if (token !== '' && Number.isFinite(number) && String(number) === token) return number;
 	return token;
 }
 
@@ -165,8 +167,6 @@ function parseList(raw: string, open: '(' | '{'): Value[] {
 	const inner = raw.slice(1, -1);
 	if (inner === '') return [];
 	const parts = splitTopLevel(inner, MAX_LIST_VALUES);
-	if (parts.length > MAX_LIST_VALUES)
-		syntaxViolation(`value list exceeds the ${MAX_LIST_VALUES}-value limit`);
 	return parts.map(parseOperand);
 }
 
@@ -177,8 +177,12 @@ function parseModifierValues(raw: string): Value[] {
 }
 
 function parseContainmentValues(operator: string, raw: string): Value[] {
-	if (!raw.startsWith('{') || !raw.endsWith('}')
-		|| (/^\{\s*"/.test(raw) && includesUnquoted(raw.slice(1, -1), ':')))
+	if (!raw.startsWith('{'))
+		throw new UnsupportedFeature(`PostgREST ${operator} operand '${raw}' cannot be represented`);
+	if (!raw.endsWith('}')) syntaxViolation(`${operator} array operand is not closed`);
+	const inner = raw.slice(1, -1);
+	if ((JSON_OBJECT_OPERAND_PATTERN.test(raw) && includesUnquoted(inner, ':'))
+		|| ['{', '}', '(', ')'].some((token) => includesUnquoted(inner, token)))
 		throw new UnsupportedFeature(`PostgREST ${operator} operand '${raw}' cannot be represented`);
 	return parseList(raw, '{');
 }
@@ -272,7 +276,7 @@ function parseFilterValue(path: string[], expression: string, budget: ParseBudge
 		term = condition(path, comparator, parseList(parsed.operand, '('), false, budget);
 	} else if (parsed.operator === 'ov') {
 		term = parsed.operand.startsWith('{')
-			? condition(path, comparator, parseList(parsed.operand, '{'), false, budget)
+			? condition(path, comparator, parseContainmentValues('ov', parsed.operand), false, budget)
 			: condition(path, 'ov', parseOperand(parsed.operand), false, budget);
 	} else if (parsed.operator === 'cs') {
 		const values = parseContainmentValues('cs', parsed.operand);
@@ -387,6 +391,9 @@ function parseSelect(
 		let feature: string | undefined;
 		if (includesUnquoted(field, '::')) feature = `projection cast '${field}'`;
 		else if (includesUnquoted(field, ':')) feature = `projection alias '${field}'`;
+		else if (AGGREGATE_PROJECTION_PATTERN.test(field)) {
+			throw new UnsupportedFeature(`PostgREST feature 'projection aggregate (${field})' is unsupported`);
+		}
 		else if (includesUnquoted(field, '(') || includesUnquoted(field, ')') || includesUnquoted(field, '!')) {
 			throw new UnsupportedFeature(`PostgREST feature 'resource embedding (${field})' is unsupported`);
 		}
@@ -407,14 +414,14 @@ function parseOrder(
 	raw: string, options: PostgrestOptions | undefined, budget: ParseBudget,
 ): SortKey[] {
 	const keys: SortKey[] = [];
-	let dropped = false;
 	for (const rawKey of splitTopLevel(raw)) {
 		let key = rawKey.trim();
 		if (!key) syntaxViolation('order contains an empty key');
+		if (includesUnquoted(key, '(') || includesUnquoted(key, ')'))
+			throw new UnsupportedFeature(`PostgREST feature 'related ordering (${key})' is unsupported`);
 		if (NULL_ORDER_PATTERN.test(key)) {
 			if (unsupported(`null ordering '${key}'`, options)) {
 				key = key.replace(NULL_ORDER_PATTERN, '');
-				dropped = true;
 			}
 		}
 		let direction: 'asc' | 'desc' = 'asc';
@@ -423,8 +430,6 @@ function parseOrder(
 		useTerms(budget, 1);
 		keys.push({ path: splitColumnPath(key), direction });
 	}
-	if (keys.length === 0 && dropped)
-		throw new UnsupportedFeature('PostgREST cannot drop every order key');
 	if (keys.length === 0) syntaxViolation('order cannot be empty');
 	return keys;
 }
@@ -484,11 +489,15 @@ export function parsePostgrest(
 ): ParseResult {
 	const result: ParseResult = {};
 	try {
-		if (typeof search === 'string' && search.length > MAX_SEARCH_LENGTH)
-			syntaxViolation(`query exceeds the ${MAX_SEARCH_LENGTH}-character limit`);
-		const parameters = typeof search === 'string'
-			? new URL_SEARCH_PARAMS(search.startsWith('?') ? search.slice(1) : search)
-			: search;
+		let parameters: URLSearchParams;
+		if (typeof search === 'string') {
+			if (search.length > MAX_SEARCH_LENGTH)
+				syntaxViolation(`query exceeds the ${MAX_SEARCH_LENGTH}-character limit`);
+			if (!URL_SEARCH_PARAMS) throw new QueryError('URLSearchParams is unavailable in this runtime');
+			parameters = new URL_SEARCH_PARAMS(search.startsWith('?') ? search.slice(1) : search);
+		} else {
+			parameters = search;
+		}
 		parseInto(result, parameters, options);
 	} catch (error) {
 		if (!(error instanceof QueryError)) throw error;

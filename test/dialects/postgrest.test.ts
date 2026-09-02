@@ -106,6 +106,10 @@ const vectors: { name: string; search: string; expected: ParseResult }[] = [
 		expected: filtered(cond(['value'], 'eq', '01')),
 	},
 	{
+		name: 'non-finite numeric spellings remain strings', search: 'value=eq.Infinity',
+		expected: filtered(cond(['value'], 'eq', 'Infinity')),
+	},
+	{
 		name: 'roundtrip signed and decimal numerals are interpreted', search: 'low=eq.-5&ratio=eq.2.5',
 		expected: filtered(cond(['low'], 'eq', -5), cond(['ratio'], 'eq', 2.5)),
 	},
@@ -385,6 +389,14 @@ describe('PostgREST input and shared-model behavior', () => {
 		assert.deepEqual(parsePostgrest(parameters), filtered(cond(['message'], 'eq', '100% ready')));
 	});
 
+	it('accepts searchParams from a URL object', () => {
+		const url = new URL('https://example.test/?id=eq.1&active=is.true');
+		assert.deepEqual(
+			parsePostgrest(url.searchParams),
+			filtered(cond(['id'], 'eq', 1), cond(['active'], 'eq', true)),
+		);
+	});
+
 	it('uses URL query decoding for plus and percent escapes', () => {
 		assert.deepEqual(
 			parsePostgrest('message=eq.hello+world%25'),
@@ -434,6 +446,27 @@ describe('PostgREST input and shared-model behavior', () => {
 		);
 	});
 
+	it('pins PostgREST field-first binding against top-level canonical dotted paths', () => {
+		assert.deepEqual(
+			parsePostgrest('meta.like=eq.5'),
+			filtered(cond(['meta', 'like'], 'eq', 5)),
+		);
+		assert.deepEqual(
+			parsePostgrest('or=(meta.like.eq.5,b.eq.1)'),
+			grouped('or', cond(['meta'], 'like', 'eq.5'), cond(['b'], 'eq', 1)),
+		);
+	});
+
+	it('combines repeated logic parameters conjunctively', () => {
+		assert.deepEqual(
+			parsePostgrest('or=(a.eq.1,b.eq.2)&or=(c.eq.3,d.eq.4)'),
+			filtered(
+				group('or', cond(['a'], 'eq', 1), cond(['b'], 'eq', 2)),
+				group('or', cond(['c'], 'eq', 3), cond(['d'], 'eq', 4)),
+			),
+		);
+	});
+
 	it('allows an unquoted operand to end in a quote character', () => {
 		assert.deepEqual(
 			parsePostgrest('title=eq.The+%22Best%22'),
@@ -450,6 +483,12 @@ describe('PostgREST input and shared-model behavior', () => {
 			['status=neq.archived', 'status=ne=archived'],
 			['id=eq(any).{1,2}', 'id=in=(1,2)'],
 			['tags=cs.{red,blue}', 'tags=red&tags=blue'],
+			['value=eq.-0', 'value==-0'],
+			['value=eq.1.0', 'value==1.0'],
+			['value=eq..5', 'value==.5'],
+			['value=eq.%2B1', 'value==%2B1'],
+			['value=eq.1e3', 'value==1e3'],
+			['value=eq.01', 'value==01'],
 		] as const;
 		for (const [postgrest, core] of equivalentPairs)
 			assert.deepEqual(parsePostgrest(postgrest), parseQuery(core));
@@ -470,6 +509,11 @@ describe('Unsupported PostgREST features', () => {
 		['nullslast ordering', 'order=age.desc.nullslast'],
 		['resource embedding', 'select=id,orders(id,total)'],
 		['hinted embedding', 'select=id,orders!inner(id)'],
+		['projection aggregate', 'select=id,amount.sum()'],
+		['related ordering', 'order=directors(last_name).desc'],
+		['multidimensional cs array', 'tags=cs.{{red},{blue}}'],
+		['multidimensional cd array', 'tags=cd.{{red},{blue}}'],
+		['multidimensional ov array', 'tags=ov.{{red},{blue}}'],
 	] as const;
 
 	for (const [name, search] of unsupported) {
@@ -526,6 +570,27 @@ describe('Unsupported PostgREST features', () => {
 
 	it('rejects unrepresentable range containment as UnsupportedFeature', () => {
 		assert.throws(() => parsePostgrest('period=cd.[1,10)'), UnsupportedFeature);
+	});
+
+	it('names aggregate projection errors accurately', () => {
+		assert.throws(
+			() => parsePostgrest('select=id,amount.sum()'),
+			(error: unknown) => error instanceof UnsupportedFeature && error.message.includes('aggregate'),
+		);
+	});
+
+	it('does not drop related ordering because it changes pagination semantics', () => {
+		assert.throws(
+			() => parsePostgrest('order=directors(last_name).desc', { onUnsupported: 'drop' }),
+			UnsupportedFeature,
+		);
+	});
+
+	it('classifies an unclosed containment array as syntax, not an unsupported feature', () => {
+		assert.throws(
+			() => parsePostgrest('tags=cs.{red,blue'),
+			(error: unknown) => error instanceof QueryError && !(error instanceof UnsupportedFeature),
+		);
 	});
 });
 
