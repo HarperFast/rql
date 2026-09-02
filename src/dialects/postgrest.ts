@@ -21,6 +21,7 @@ export class UnsupportedFeature extends QueryError {}
 const MAX_LOGIC_DEPTH = 32;
 const MAX_TERMS = 1_000;
 const MAX_LIST_VALUES = 1_000;
+const MAX_SEARCH_LENGTH = 65_536;
 
 const OPERATOR_NAMES = new Set([
 	'eq', 'gt', 'gte', 'lt', 'lte', 'neq', 'in', 'cs', 'cd', 'ov', 'is',
@@ -29,12 +30,18 @@ const OPERATOR_NAMES = new Set([
 ]);
 
 const CONFIGURABLE_OPERATORS = new Set(['fts', 'plfts', 'phfts', 'wfts']);
+const MODIFIER_OPERATORS = new Set([
+	'eq', 'gt', 'gte', 'lt', 'lte', 'neq',
+	'like', 'ilike', 'match', 'imatch', 'fts', 'plfts', 'phfts', 'wfts',
+	'sl', 'sr', 'nxl', 'nxr', 'adj', 'isdistinct',
+]);
 
 const FILTER_PATTERN = /^(not\.)?([a-z][a-z0-9_]*)(?:\(([^()]*)\))?\.([\s\S]*)$/;
 const LOGIC_OPERATOR_PATTERN = /^(?:not\.)?([a-z][a-z0-9_]*)(?:\([^()]*\))?\./;
 const LOGIC_CALL_PATTERN = /^(not\.)?(and|or)\(/;
 const NULL_ORDER_PATTERN = /(?:^|\.)(?:nullsfirst|nullslast)$/;
 const NON_NEGATIVE_INTEGER_PATTERN = /^(?:0|[1-9][0-9]*)$/;
+const CONFIGURATION_ARGUMENT_PATTERN = /^[a-z_][a-z0-9_$]*$/i;
 
 const URL_SEARCH_PARAMS = (globalThis as unknown as {
 	URLSearchParams: URLSearchParamsConstructor;
@@ -169,6 +176,13 @@ function parseModifierValues(raw: string): Value[] {
 	syntaxViolation('any/all modifier requires a value list');
 }
 
+function parseContainmentValues(operator: string, raw: string): Value[] {
+	if (!raw.startsWith('{') || !raw.endsWith('}')
+		|| (/^\{\s*"/.test(raw) && includesUnquoted(raw.slice(1, -1), ':')))
+		throw new UnsupportedFeature(`PostgREST ${operator} operand '${raw}' cannot be represented`);
+	return parseList(raw, '{');
+}
+
 function splitColumnPath(raw: string): string[] {
 	if (!raw) syntaxViolation('column path is empty');
 	const segments: string[] = [];
@@ -221,6 +235,11 @@ function parseOperator(expression: string): ParsedOperator {
 	if (!OPERATOR_NAMES.has(operator)) syntaxViolation(`unknown PostgREST operator '${operator}'`);
 	if (argument !== undefined && argument !== 'any' && argument !== 'all' && !CONFIGURABLE_OPERATORS.has(operator))
 		syntaxViolation(`operator '${operator}' does not accept configuration arguments`);
+	if ((argument === 'any' || argument === 'all') && !MODIFIER_OPERATORS.has(operator))
+		syntaxViolation(`operator '${operator}' does not accept the '${argument}' modifier`);
+	if (argument !== undefined && argument !== 'any' && argument !== 'all'
+		&& !CONFIGURATION_ARGUMENT_PATTERN.test(argument))
+		syntaxViolation(`operator '${operator}' has an invalid configuration argument`);
 	return { operator, argument, negated: notPrefix !== undefined, operand };
 }
 
@@ -256,13 +275,13 @@ function parseFilterValue(path: string[], expression: string, budget: ParseBudge
 			? condition(path, comparator, parseList(parsed.operand, '{'), false, budget)
 			: condition(path, 'ov', parseOperand(parsed.operand), false, budget);
 	} else if (parsed.operator === 'cs') {
-		const values = parseList(parsed.operand, '{');
+		const values = parseContainmentValues('cs', parsed.operand);
 		term = {
 			operator: 'and',
 			terms: values.map((value) => condition(path, 'eq', value, false, budget)),
 		};
 	} else if (parsed.operator === 'cd') {
-		const values = parseList(parsed.operand, '{');
+		const values = parseContainmentValues('cd', parsed.operand);
 		const inner = condition([], 'in', values, true, budget);
 		term = negateTerm({ path, some: { operator: 'and', terms: [inner] } });
 	} else if (parsed.argument === 'any' || parsed.argument === 'all') {
@@ -318,17 +337,11 @@ function parseLogicLeaf(raw: string, budget: ParseBudget): Term {
 	}
 	if (quoted) syntaxViolation('unterminated quoted column path');
 	if (stack.length > 0) syntaxViolation('unbalanced operand delimiter');
-	for (let candidate = candidateIndexes.length - 1; candidate >= 0; candidate--) {
+	for (let candidate = 0; candidate < candidateIndexes.length; candidate++) {
 		const index = candidateIndexes[candidate];
 		const expression = raw.slice(index + 1);
 		const operatorMatch = LOGIC_OPERATOR_PATTERN.exec(expression);
 		if (operatorMatch && OPERATOR_NAMES.has(operatorMatch[1])) {
-			const previousIndex = candidate > 0 ? candidateIndexes[candidate - 1] : -1;
-			if (previousIndex >= 0 && raw.slice(previousIndex + 1, index) === 'not') {
-				return parseFilterValue(
-					splitColumnPath(raw.slice(0, previousIndex)), raw.slice(previousIndex + 1), budget,
-				);
-			}
 			return parseFilterValue(splitColumnPath(raw.slice(0, index)), expression, budget);
 		}
 	}
@@ -399,7 +412,10 @@ function parseOrder(
 		let key = rawKey.trim();
 		if (!key) syntaxViolation('order contains an empty key');
 		if (NULL_ORDER_PATTERN.test(key)) {
-			if (unsupported(`null ordering '${key}'`, options)) { dropped = true; continue; }
+			if (unsupported(`null ordering '${key}'`, options)) {
+				key = key.replace(NULL_ORDER_PATTERN, '');
+				dropped = true;
+			}
 		}
 		let direction: 'asc' | 'desc' = 'asc';
 		if (key.endsWith('.asc')) key = key.slice(0, -4);
@@ -432,8 +448,12 @@ function parseInto(
 	const terms: Term[] = [];
 	const budget: ParseBudget = { terms: 0 };
 	const seenReserved = new Set<string>();
+	let decodedLength = 0;
 
 	for (const [key, value] of parameters.entries()) {
+		decodedLength += key.length + value.length + 2;
+		if (decodedLength > MAX_SEARCH_LENGTH)
+			syntaxViolation(`query exceeds the ${MAX_SEARCH_LENGTH}-character limit`);
 		if (key === 'select' || key === 'order' || key === 'limit' || key === 'offset') {
 			if (seenReserved.has(key)) syntaxViolation(`duplicate '${key}' parameter`);
 			seenReserved.add(key);
@@ -464,6 +484,8 @@ export function parsePostgrest(
 ): ParseResult {
 	const result: ParseResult = {};
 	try {
+		if (typeof search === 'string' && search.length > MAX_SEARCH_LENGTH)
+			syntaxViolation(`query exceeds the ${MAX_SEARCH_LENGTH}-character limit`);
 		const parameters = typeof search === 'string'
 			? new URL_SEARCH_PARAMS(search.startsWith('?') ? search.slice(1) : search)
 			: search;
