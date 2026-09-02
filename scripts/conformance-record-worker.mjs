@@ -31,22 +31,33 @@ async function main() {
 	const { parseQuery } = await importFromHarper('dist/resources/search.js');
 	const { RequestTarget } = await importFromHarper('dist/resources/RequestTarget.js');
 
+	/**
+	 * Run one entry point and tag its result. Only the PARSE may fail as a rejection —
+	 * an encoding failure is a harness fault, and recording it as `status: 'error'` would
+	 * put a fake Harper rejection in the fixture for a rule to classify as a divergence.
+	 */
+	const capture = (parse) => {
+		let result;
+		try {
+			result = parse();
+		} catch (error) {
+			return { status: 'error', ...describe(error) };
+		}
+		return { status: 'ok', raw: encodeTagged(result) };
+	};
+
 	process.on('message', (message) => {
 		if (message?.type !== 'record') return;
 		const query = message.query;
 
 		let strict;
-		try {
-			strict = { status: 'ok', raw: encodeTagged(parseQuery(query)) };
-		} catch (error) {
-			strict = { status: 'error', ...describe(error) };
-		}
-
 		let target;
 		try {
-			target = { status: 'ok', raw: encodeTagged(new RequestTarget(`?${query}`)) };
+			strict = capture(() => parseQuery(query));
+			target = capture(() => new RequestTarget(`?${query}`));
 		} catch (error) {
-			target = { status: 'error', ...describe(error) };
+			process.send({ type: 'fatal', ...describe(error) }, () => process.exit(1));
+			return;
 		}
 
 		// Exit only once the message has actually been flushed to the parent — `process.send`

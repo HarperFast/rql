@@ -80,6 +80,8 @@ disagreement.
 - `conformance/canonical.ts` — canonical JSON plus the pointer-addressed differ.
 - `conformance/classify.ts` — the residual filter and the ordered rule set.
 - `conformance/compare.ts` — run assembly, shared by the runner and the tests.
+- `conformance/referenceRunner.ts` — worker supervision; a separate module so its crash windows
+  can be tested against deliberately broken workers.
 - `conformance/report.ts` — Markdown rendering from committed data only.
 - `scripts/conformance-diff.mjs` — the CLI; `scripts/conformance-record-worker.mjs` and
   `scripts/conformance-ref-worker.mjs` — the two process boundaries;

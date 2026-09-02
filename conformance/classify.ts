@@ -554,19 +554,26 @@ const VALUE_MODE_CLASSIFICATION: Extract<Classification, { verdict: 'new' }> = {
 };
 
 /**
- * Outcomes that can constitute agreement. A timeout, an adapter gap or a harness error is
- * never agreement, even when both sides report it — those mean the harness did not observe
- * the parse, which has to surface rather than pass.
+ * The statuses that mean "this parser was actually observed". A timeout, an adapter gap or a
+ * harness error is none of those: nothing was learned about the query, so such an outcome can
+ * neither be agreement nor be explained by a rule about how the two parsers differ.
  */
-const AGREEABLE_STATUSES: ReadonlySet<string> = new Set(['parsed', 'rejected', 'deferred-error']);
+const OBSERVED_STATUSES: ReadonlySet<string> = new Set(['parsed', 'rejected', 'deferred-error']);
+
+const wasObserved = (outcome: Outcome): boolean => OBSERVED_STATUSES.has(outcome.status);
 
 export function classify(comparison: Comparison): Classification {
-	// Note that agreement requires the same *mode* of rejection, not merely that neither side
-	// accepted: a `rejected` on one side and a `deferred-error` on the other is a real
-	// difference (the deferring side still produced a partial result) and must reach the rules.
+	// An unobserved parse must never reach the rules. Several rules are pinned to witness
+	// queries and would otherwise match on the query string alone, so a timed-out reference
+	// parse for `limit(x)` would be reported as the limit-validation divergence and the run
+	// would exit 0 having compared nothing.
+	if (!wasObserved(comparison.ref) || !wasObserved(comparison.harper)) return { verdict: 'unclassified' };
+
+	// Agreement requires the same *mode* of rejection, not merely that neither side accepted:
+	// a `rejected` on one side and a `deferred-error` on the other is a real difference,
+	// because the deferring side still produced a partial result.
 	if (
 		comparison.ref.status === comparison.harper.status &&
-		AGREEABLE_STATUSES.has(comparison.ref.status) &&
 		comparison.differences.length === 0 &&
 		!comparison.alsoUninterpretedValues
 	)

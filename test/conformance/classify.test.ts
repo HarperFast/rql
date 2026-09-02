@@ -88,8 +88,8 @@ describe('classify', () => {
 	});
 
 	it('does not attribute an unrelated disagreement to a ledger tag the case happens to carry', () => {
-		// `ledger-6-lenient-value-scan` fires only on the shape the tolerance produces
-		// (Harper accepts, the reference does not) — not on any difference at all.
+		// The tolerance rule requires Harper to accept where the reference rejects, not merely
+		// that the case carries the tag.
 		const verdict = classify(
 			comparison({
 				case: { ...CASE, query: 'foo=ba)r', features: ['tolerance'], ledger: [6] },

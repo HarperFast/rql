@@ -64,6 +64,7 @@ costs that case and not the run.
 | `canonical.ts` | Deterministic canonical JSON for a `ParseResult`, plus the structural differ the classification rules match on. |
 | `classify.ts` | The rules. Each maps the *shape* of a disagreement (or a named set of witness queries) to a ledger row, a proposed new row, or a reference-parser bug. |
 | `compare.ts` | Assembles a run from the fixture plus reference outcomes. Shared by the runner and the tests. |
+| `referenceRunner.ts` | Supervises the reference-parser worker: per-parse timeout, restart, and a settled outcome on every failure path. |
 | `report.ts` | Markdown rendering. Reads only committed data, never the wall clock, so the report is stable. |
 | `ledger.json` | A provenance-stamped **cache** of harper#2440. The issue stays canonical. |
 | `fixtures/harper-parse.json` | Recorded raw Harper output, stamped with the Harper commit, the reference commit, the Node version and the corpus digest. |

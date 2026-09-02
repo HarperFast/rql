@@ -35,6 +35,7 @@ import { fileURLToPath } from 'node:url';
 
 import { CORPUS, corpusDigest } from '../conformance/corpus.ts';
 import { buildRun } from '../conformance/compare.ts';
+import { ReferenceRunner } from '../conformance/referenceRunner.ts';
 import { renderReport } from '../conformance/report.ts';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
@@ -163,15 +164,16 @@ async function record() {
 		node: process.version,
 	};
 
-	const cases = {};
+	const recorded = new Array(CORPUS.length);
 	let done = 0;
 	let cursor = 0;
 	const runNext = async () => {
 		while (cursor < CORPUS.length) {
-			const item = CORPUS[cursor++];
+			const index = cursor++;
+			const item = CORPUS[index];
 			const outcome = await recordOne(harperPath, item.query);
 			if (outcome.fatal) fail(`Recording ${JSON.stringify(item.query)} failed: ${outcome.fatal}`);
-			cases[item.id] = outcome.timedOut
+			recorded[index] = outcome.timedOut
 				? { query: item.query, timedOut: true, timeoutMs: options.timeout }
 				: { query: item.query, strict: outcome.strict, target: outcome.target };
 			done++;
@@ -181,112 +183,20 @@ async function record() {
 	process.stderr.write(`Recording ${CORPUS.length} cases against Harper at ${harperPath}\n`);
 	await Promise.all(Array.from({ length: options.concurrency }, runNext));
 
+	// Assembled in corpus order, not in the order the workers happened to finish: a fixture
+	// keyed by completion order re-diffs at hundreds of positions on every unchanged re-record
+	// and buries the parser change someone is actually looking for.
+	const cases = {};
+	CORPUS.forEach((item, index) => {
+		cases[item.id] = recorded[index];
+	});
+
 	mkdirSync(dirname(FIXTURE), { recursive: true });
 	const body = JSON.stringify({ schema: FIXTURE_SCHEMA, provenance, cases }, null, '\t') + '\n';
 	// Atomic: a half-written fixture would replay as silent corpus drift.
 	writeFileSync(`${FIXTURE}.tmp`, body);
 	renameSync(`${FIXTURE}.tmp`, FIXTURE);
 	process.stderr.write(`Wrote ${FIXTURE}\n`);
-}
-
-// ── replay: one persistent reference worker, restarted on timeout ───────────
-
-class ReferenceRunner {
-	#child;
-	#pending = new Map();
-	#nextId = 0;
-	/** Set once the worker cannot be replaced; every later parse fails fast instead of hanging. */
-	#dead;
-
-	/**
-	 * Settle every in-flight parse with a harness error. A reference outcome the harness could
-	 * not observe must never look like agreement, so it flows on to the classifier, finds no
-	 * rule, and fails the run with the query named.
-	 */
-	#failPending(reason) {
-		const pending = this.#pending;
-		this.#pending = new Map();
-		for (const entry of pending.values()) {
-			clearTimeout(entry.timer);
-			const outcome = { status: 'harness-error', error: reason };
-			entry.resolve({ strict: outcome, deferred: outcome });
-		}
-	}
-
-	async #spawn() {
-		const child = fork(join(scriptDir, 'conformance-ref-worker.mjs'), [], {
-			stdio: ['ignore', 'ignore', 'inherit', 'ipc'],
-		});
-		this.#child = child;
-		// Requests are issued one at a time by the replay loop, so replacing the pending map on
-		// a restart cannot strand a second in-flight parse.
-		this.#pending = new Map();
-
-		child.on('message', (message) => {
-			if (message?.type !== 'result') return;
-			const entry = this.#pending.get(message.id);
-			if (!entry) return;
-			this.#pending.delete(message.id);
-			clearTimeout(entry.timer);
-			entry.resolve({ strict: message.strict, deferred: message.deferred });
-		});
-		// Without these, a worker that dies mid-parse (uncaught throw, OOM kill) leaves its
-		// promise unsettled and the whole run hangs instead of failing.
-		const onGone = (reason) => {
-			if (this.#child !== child) return;
-			this.#dead ??= reason;
-			this.#failPending(reason);
-		};
-		child.on('exit', (code, signal) => onGone(`the reference worker exited (code ${code}, signal ${signal})`));
-		child.on('error', (error) => onGone(`the reference worker failed to run: ${error.message}`));
-
-		await new Promise((ready, reject) => {
-			const timer = setTimeout(() => reject(new Error(`the reference worker did not start within ${options.startupTimeout}ms`)), options.startupTimeout);
-			const settle = (fn, value) => {
-				clearTimeout(timer);
-				fn(value);
-			};
-			child.once('message', (message) =>
-				message?.type === 'ready' ? settle(ready) : settle(reject, new Error('the reference worker sent no ready message'))
-			);
-			child.once('error', (error) => settle(reject, error));
-			child.once('exit', (code, signal) => settle(reject, new Error(`the reference worker exited before starting (code ${code}, signal ${signal})`)));
-		});
-		this.#dead = undefined;
-	}
-
-	async start() {
-		await this.#spawn();
-	}
-
-	/**
-	 * One parse. On a timeout the worker is killed and replaced, so one wedged case costs
-	 * exactly that case rather than the rest of the corpus. A replacement that will not start
-	 * ends the run's reference coverage rather than hanging it.
-	 */
-	parse(query) {
-		if (this.#dead) return Promise.resolve({ strict: { status: 'harness-error', error: this.#dead }, deferred: { status: 'harness-error', error: this.#dead } });
-		const id = this.#nextId++;
-		return new Promise((resolveOutcome) => {
-			const timer = setTimeout(async () => {
-				this.#pending.delete(id);
-				const timedOut = { status: 'timeout', ms: options.timeout };
-				this.#child.kill('SIGKILL');
-				try {
-					await this.#spawn();
-				} catch (error) {
-					this.#dead = `the reference worker could not be restarted: ${error.message}`;
-				}
-				resolveOutcome({ strict: timedOut, deferred: timedOut });
-			}, options.timeout);
-			this.#pending.set(id, { resolve: resolveOutcome, timer });
-			this.#child.send({ type: 'parse', id, query });
-		});
-	}
-
-	stop() {
-		this.#child?.kill();
-	}
 }
 
 async function replay() {
@@ -314,7 +224,11 @@ async function replay() {
 				'         Classifications may cite rows that have since changed — run `npm run conformance:refresh-ledger`.\n'
 		);
 
-	const runner = new ReferenceRunner();
+	const runner = new ReferenceRunner({
+		workerPath: join(scriptDir, 'conformance-ref-worker.mjs'),
+		timeoutMs: options.timeout,
+		startupTimeoutMs: options.startupTimeout,
+	});
 	await runner.start();
 
 	// The reference parses run first, sequentially and each under its own timeout; the run is
@@ -334,6 +248,29 @@ async function replay() {
 	const report = renderReport(run);
 	const unclassified = comparisons.filter((comparison) => comparison.classification.verdict === 'unclassified');
 
+	const counts = comparisons.reduce((tally, comparison) => {
+		tally[comparison.classification.verdict] = (tally[comparison.classification.verdict] ?? 0) + 1;
+		return tally;
+	}, {});
+	process.stderr.write(
+		`agrees=${counts.agrees ?? 0} ledger=${counts.ledger ?? 0} new=${counts.new ?? 0} ` +
+			`reference-bug=${counts['reference-bug'] ?? 0} unclassified=${counts.unclassified ?? 0}\n`
+	);
+
+	// The run is validated BEFORE the committed report is touched. A dead reference worker or
+	// an unclassified divergence must not first clobber the last good report on its way out.
+	if (unclassified.length > 0) {
+		writeFileSync(`${options.out}.actual`, report);
+		process.stderr.write(`\n${unclassified.length} divergence(s) are unclassified. Add a rule in conformance/classify.ts:\n`);
+		for (const comparison of unclassified.slice(0, 40))
+			process.stderr.write(
+				`  ${JSON.stringify(comparison.case.query)}  ref=${comparison.ref.status} harper=${comparison.harper.status}` +
+					`${comparison.differences.length ? ` diffs=${comparison.differences.map((difference) => difference.at || '/').join(',')}` : ''}\n`
+			);
+		if (unclassified.length > 40) process.stderr.write(`  … and ${unclassified.length - 40} more\n`);
+		fail(`${options.out} was left unchanged; the run that could not be classified is in ${options.out}.actual.`, 1);
+	}
+
 	if (options.check) {
 		const existing = existsSync(options.out) ? readFileSync(options.out, 'utf8') : '';
 		if (existing !== report) {
@@ -345,30 +282,12 @@ async function replay() {
 			);
 		}
 		process.stderr.write(`${options.out} is up to date (${comparisons.length} cases).\n`);
-	} else {
-		writeFileSync(options.out, report);
-		process.stderr.write(`Wrote ${options.out} (${comparisons.length} cases).\n`);
+		return;
 	}
 
-	const counts = comparisons.reduce((tally, comparison) => {
-		tally[comparison.classification.verdict] = (tally[comparison.classification.verdict] ?? 0) + 1;
-		return tally;
-	}, {});
-	process.stderr.write(
-		`agrees=${counts.agrees ?? 0} ledger=${counts.ledger ?? 0} new=${counts.new ?? 0} ` +
-			`reference-bug=${counts['reference-bug'] ?? 0} unclassified=${counts.unclassified ?? 0}\n`
-	);
-
-	if (unclassified.length > 0) {
-		process.stderr.write(`\n${unclassified.length} divergence(s) are unclassified. Add a rule in conformance/classify.ts:\n`);
-		for (const comparison of unclassified.slice(0, 40))
-			process.stderr.write(
-				`  ${JSON.stringify(comparison.case.query)}  ref=${comparison.ref.status} harper=${comparison.harper.status}` +
-					`${comparison.differences.length ? ` diffs=${comparison.differences.map((difference) => difference.at || '/').join(',')}` : ''}\n`
-			);
-		if (unclassified.length > 40) process.stderr.write(`  … and ${unclassified.length - 40} more\n`);
-		process.exit(1);
-	}
+	writeFileSync(`${options.out}.tmp`, report);
+	renameSync(`${options.out}.tmp`, options.out);
+	process.stderr.write(`Wrote ${options.out} (${comparisons.length} cases).\n`);
 }
 
 if (options.record) await record();
