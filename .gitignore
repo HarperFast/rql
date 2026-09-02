@@ -3,3 +3,4 @@ node_modules
 npm-debug.log
 dist
 conformance/*.actual
+conformance/*.tmp

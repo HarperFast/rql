@@ -34,7 +34,6 @@ function describeOutcome(outcome: Outcome): string {
 	}
 }
 
-/** The canonical result an outcome carries, if it produced one. */
 export function canonicalOf(outcome: Outcome): Json | undefined {
 	return outcome.status === 'parsed' || outcome.status === 'deferred-error' ? outcome.canonical : undefined;
 }

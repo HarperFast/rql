@@ -85,7 +85,7 @@ function canonicalTerm(term: Term): Json {
 	return out;
 }
 
-/** JSON with object keys emitted in sorted order, so equal structures produce equal bytes. */
+/** Keys are emitted sorted, so two equal structures serialize to identical bytes. */
 export function stableStringify(value: Json, indent = 0): string {
 	const render = (node: Json, depth: number): string => {
 		const pad = indent ? '\n' + ' '.repeat(indent * (depth + 1)) : '';
@@ -127,7 +127,6 @@ export type Difference = {
 
 const typeOf = (node: Json): string => (node === null ? 'null' : Array.isArray(node) ? 'array' : typeof node);
 
-/** Structural difference list between the reference result and the adapted Harper result. */
 export function diffCanonical(ref: Json, harper: Json): Difference[] {
 	const differences: Difference[] = [];
 	walk('', ref, harper, differences);

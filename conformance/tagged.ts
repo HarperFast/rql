@@ -137,10 +137,3 @@ export function decodeTagged(value: Tagged): unknown {
 		}
 	}
 }
-
-/** Constructor name recorded for a tagged object/USP, or undefined for anything else. */
-export function taggedCtor(value: Tagged): string | undefined {
-	if (!isTag(value)) return undefined;
-	if (value.$ === 'object' || value.$ === 'usp') return value.ctor;
-	return undefined;
-}

@@ -19,7 +19,9 @@
  *    surprising way, that is recorded in the report as an observation, not folded in here.
  * 5. **Total, except for genuinely unknown shapes.** Anything the adapter cannot place
  *    raises `AdapterError`, which the report surfaces as an adapter gap rather than
- *    silently dropping.
+ *    silently dropping. A known field carrying an unknown shape or value counts: guessing
+ *    at it would let the harness compare a fabricated result, and possibly report agreement,
+ *    the day Harper changes one of these structures.
  */
 
 import type { Condition, ElementMatch, Field, Group, ParseResult, Projection, SortKey, Value } from '../src/types.ts';
@@ -34,6 +36,19 @@ export type HarperOutcome =
 type Dict = Record<string, unknown>;
 
 const isDict = (value: unknown): value is Dict => typeof value === 'object' && value !== null;
+
+/** Harper writes `operator` only as 'and' or 'or', and leaves it unset for a single term. */
+function groupOperator(raw: unknown, where: string): 'and' | 'or' {
+	if (raw === undefined || raw === null || raw === 'and') return 'and';
+	if (raw === 'or') return 'or';
+	throw new AdapterError(`unsupported ${where} operator ${JSON.stringify(raw)}`);
+}
+
+function optionalBoolean(raw: unknown, where: string): boolean {
+	if (raw === undefined || raw === null) return false;
+	if (typeof raw !== 'boolean') throw new AdapterError(`${where} is not a boolean: ${JSON.stringify(raw)}`);
+	return raw;
+}
 
 /** Harper comparator name → canonical comparator plus whether the alias itself negates. */
 const COMPARATOR_ALIASES: Readonly<Record<string, { comparator: string; negated?: true }>> = {
@@ -114,7 +129,7 @@ function relativeLeg(raw: Dict, scopePath: string[]): Condition {
 function adaptCondition(raw: Dict): Condition | ElementMatch {
 	const rawComparator = raw.comparator === undefined || raw.comparator === null ? 'equals' : String(raw.comparator);
 	const path = decodedPath(raw.attribute);
-	const negatedByFlag = raw.negated === true;
+	const negatedByFlag = optionalBoolean(raw.negated, 'condition.negated');
 
 	if (rawComparator === 'between') {
 		const bounds = raw.value;
@@ -155,7 +170,9 @@ function adaptCondition(raw: Dict): Condition | ElementMatch {
  */
 function withChain(raw: Dict, head: Condition | ElementMatch, path: string[]): Condition | ElementMatch {
 	const chained = raw.chainedConditions;
-	if (!Array.isArray(chained) || chained.length === 0) return head;
+	if (chained === undefined || chained === null) return head;
+	if (!Array.isArray(chained)) throw new AdapterError(`chainedConditions is not a list: ${String(chained)}`);
+	if (chained.length === 0) return head;
 
 	const terms: (Condition | Group | ElementMatch)[] = [];
 	if ('some' in head) terms.push(...head.some.terms);
@@ -165,7 +182,7 @@ function withChain(raw: Dict, head: Condition | ElementMatch, path: string[]): C
 		terms.push(relativeLeg(leg, path));
 	}
 
-	const match: ElementMatch = { path, some: { operator: raw.operator === 'or' ? 'or' : 'and', terms } };
+	const match: ElementMatch = { path, some: { operator: groupOperator(raw.operator, 'chain'), terms } };
 	if ('some' in head && head.negated) match.negated = true;
 	return normalizeElementMatch(match);
 }
@@ -184,7 +201,7 @@ function adaptTerm(raw: unknown): Condition | Group | ElementMatch {
 
 function adaptGroup(raw: Dict): Group {
 	const conditions = raw.conditions as unknown[];
-	return { operator: raw.operator === 'or' ? 'or' : 'and', terms: conditions.map(adaptTerm) };
+	return { operator: groupOperator(raw.operator, 'group'), terms: conditions.map(adaptTerm) };
 }
 
 /** Harper's sort is a linked list of `{attribute, descending, next}` (ledger row 5). */
@@ -195,7 +212,7 @@ function adaptSort(raw: unknown): SortKey[] {
 		if (!isDict(node)) throw new AdapterError(`unsupported sort node: ${String(node)}`);
 		keys.push({
 			path: node.attribute === '' ? [''] : decodedPath(node.attribute),
-			direction: node.descending === true ? 'desc' : 'asc',
+			direction: optionalBoolean(node.descending, 'sort.descending') ? 'desc' : 'asc',
 		});
 		node = node.next;
 	}
@@ -229,7 +246,7 @@ function adaptSelect(raw: unknown): Projection {
 	if (Array.isArray(raw)) {
 		const named = (raw as unknown as Dict).name;
 		if (named !== undefined) return { mode: 'records', fields: [adaptField(raw)] };
-		if ((raw as unknown as Dict).asArray === true) return { mode: 'tuples', fields: raw.map(adaptField) };
+		if (optionalBoolean((raw as unknown as Dict).asArray, 'select.asArray')) return { mode: 'tuples', fields: raw.map(adaptField) };
 		return { mode: 'records', fields: raw.map(adaptField) };
 	}
 	if (isDict(raw) && raw.select !== undefined) return { mode: 'records', fields: [adaptField(raw)] };
@@ -244,6 +261,8 @@ function adaptNumber(raw: unknown, field: string): number {
 function adaptQueryBody(raw: Dict): ParseResult {
 	const result: ParseResult = {};
 	const conditions = raw.conditions;
+	if (conditions !== undefined && conditions !== null && !Array.isArray(conditions))
+		throw new AdapterError(`conditions is not a list: ${Object.prototype.toString.call(conditions)}`);
 	if (Array.isArray(conditions) && conditions.length > 0) result.filter = adaptGroup(raw);
 	if (raw.sort !== undefined && raw.sort !== null) result.sort = adaptSort(raw.sort);
 	if (raw.select !== undefined) result.select = adaptSelect(raw.select);

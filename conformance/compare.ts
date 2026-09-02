@@ -12,7 +12,6 @@ import { decodeTagged, type Tagged } from './tagged.ts';
 import { AdapterError, adaptHarperResult } from './harperAdapter.ts';
 import { type Classification, type Comparison, classify, partitionDifferences } from './classify.ts';
 
-/** One case as the fixture stores it. */
 export type RecordedCase = {
 	query: string;
 	timedOut?: boolean;

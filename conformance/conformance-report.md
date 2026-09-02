@@ -26,8 +26,8 @@ disagreement is classified below; an unclassified disagreement fails the run.
 |---|---|
 | Harper commit | `11a1c489168dfb00c6a66472cef14cb3f875286f` (v5.2.2-14-g11a1c4891) |
 | Harper version | `5.2.2` |
-| Reference parser commit | `ab665de98490b53dbcc017857a8e1320d67c704b` (v0.3.3-23-gab665de) **+ uncommitted changes** |
-| Fixture recorded | 2026-09-01T23:38:56.709Z |
+| Reference parser commit | `32599416d13687d2a1805737f6f61536925ccfa6` (v0.3.3-25-g3259941) **+ uncommitted changes** |
+| Fixture recorded | 2026-09-02T00:13:35.509Z |
 | Recorded on Node | `v26.2.0` |
 | Corpus digest | `349-6b64d3e9` |
 | Ledger snapshot | [HarperFast/harper#2440](https://github.com/HarperFast/harper/issues/2440), 14 rows, fetched 2026-09-01T23:16:18.888Z |
