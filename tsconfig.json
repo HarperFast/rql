@@ -3,6 +3,7 @@
 		"target": "ES2022",
 		"module": "NodeNext",
 		"moduleResolution": "NodeNext",
+		"rewriteRelativeImportExtensions": true,
 		"outDir": "dist",
 		"declaration": true,
 		"declarationMap": true,
