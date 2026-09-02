@@ -147,6 +147,28 @@ describe('ReferenceRunner — failure paths', () => {
 		}
 	});
 
+	it('holds the single-flight guard across the restart a timeout triggers', async () => {
+		// Slow to report ready, so the restart window is wide enough to observe: the pending
+		// entry is dropped the moment the timer fires, and the guard must still hold until the
+		// replacement is up and the original parse has settled.
+		const path = stub(
+			'slow-to-start.mjs',
+			`process.on('message', () => {});\nsetTimeout(() => process.send({ type: 'ready' }), 400);\n`
+		);
+		const runner = new ReferenceRunner({ workerPath: path, timeoutMs: 200, startupTimeoutMs: 5000, stderr: 'ignore' });
+		await runner.start();
+		try {
+			const timingOut = runner.parse('a=1');
+			await new Promise((wake) => setTimeout(wake, 350));
+			assert.throws(() => runner.parse('b=2'), /single-flight/);
+			assert.equal((await withDeadline(timingOut, 10_000, 'the timing-out parse')).strict.status, 'timeout');
+			// …and it lifts once that parse has settled.
+			assert.doesNotThrow(() => void runner.parse('c=3').catch(() => undefined));
+		} finally {
+			runner.stop();
+		}
+	});
+
 	it('does not hang when asked to parse before it was started', async () => {
 		const runner = new ReferenceRunner({ workerPath: REAL_WORKER, ...options });
 		const outcomes = await withDeadline(runner.parse('a=1'), 5_000, 'a parse before start()');
