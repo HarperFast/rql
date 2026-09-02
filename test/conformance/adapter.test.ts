@@ -317,6 +317,31 @@ describe('harper adapter — errors', () => {
 		assert.throws(() => adaptHarperResult(query({ select: Object.assign(['a'], { asArray: 'yes' }) })), AdapterError);
 	});
 
+	it('raises AdapterError for a result member it has never seen', () => {
+		// Silently dropping a member Harper grew later could let the harness report agreement on
+		// a query whose meaning changed.
+		assert.throws(() => adaptHarperResult(query({ distinct: ['a'] })), /unknown parse-result member/);
+		const target = new URLSearchParams('a=1') as URLSearchParams & Record<string, unknown>;
+		target.conditions = [];
+		target.groupBy = ['a'];
+		assert.throws(() => adaptHarperResult(target), /unknown parse-result member/);
+	});
+
+	it('ignores the RequestTarget plumbing that carries no query semantics', () => {
+		const target = new URLSearchParams('a=1') as URLSearchParams & Record<string, unknown>;
+		Object.assign(target, {
+			id: null,
+			isCollection: true,
+			pathname: undefined,
+			search: 'a=1',
+			sort: null,
+			conditions: [{ comparator: 'equals', attribute: 'a', value: '1' }],
+		});
+		assert.deepEqual(adapt(target), {
+			filter: { operator: 'and', terms: [{ path: ['a'], comparator: 'eq', value: '1' }] },
+		});
+	});
+
 	it('raises AdapterError rather than guessing at a shape it does not know', () => {
 		assert.throws(() => adaptHarperResult(42), AdapterError);
 		assert.throws(() => adaptHarperResult(query({ conditions: [{ nonsense: true }] })), AdapterError);
