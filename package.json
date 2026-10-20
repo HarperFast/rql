@@ -1,54 +1,24 @@
 {
-  "name": "rql",
-  "version": "0.3.3",
-  "author": "Kris Zyp",
-  "contributors": [
-    "Vladimir Dronnikov <dronnikov@gmail.com>"
-  ],
-  "keywords": [
-    "resource",
-    "query",
-    "uri"
-  ],
-  "description": "Query language for the web, NoSQL",
-  "licenses": [
-    {
-      "type": "AFLv2.1",
-      "url": "http://trac.dojotoolkit.org/browser/dojo/trunk/LICENSE#L43"
-    },
-    {
-      "type": "BSD",
-      "url": "http://trac.dojotoolkit.org/browser/dojo/trunk/LICENSE#L13"
-    }
-  ],
-  "directories": {
-    "lib": "."
-  },
-  "repository": {
-    "type": "git",
-    "url": "http://github.com/kriszyp/rql"
-  },
-  "maintainers": [
-    {
-      "name": "Kris Zyp",
-      "email": "kriszyp@gmail.com"
-    }
-  ],
-  "mappings": {
-    "patr": "http://github.com/kriszyp/patr/zipball/v0.2.1",
-    "promised-io": "http://github.com/kriszyp/promised-io/zipball/v0.2.1"
-  },
-  "dependencies": {
-    "promised-io": ">=0.3.0"
-  },
-  "devDependencies": {
-    "intern-geezer": "^2.1.1"
-  },
-  "scripts": {
-    "test": "intern-client config=test/intern",
-    "test.sauce": "intern-runner config=test/intern",
-    "test.proxy": "intern-runner config=test/intern --proxyOnly"
-  },
-  "icon": "http://packages.dojofoundation.org/images/persvr.png",
-  "dojoBuild": "package.js"
+	"name": "rql",
+	"version": "2.0.0-alpha.0",
+	"description": "RQL 2.0 — reference implementation of the Harper query language",
+	"type": "module",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"default": "./dist/index.js"
+		}
+	},
+	"files": [
+		"dist",
+		"src"
+	],
+	"scripts": {
+		"build": "tsc",
+		"test": "node --experimental-strip-types --test test/v2/parse.test.ts",
+		"typecheck": "tsc --noEmit"
+	},
+	"devDependencies": {
+		"typescript": "^5.8.0"
+	}
 }

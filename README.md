@@ -1,3 +1,11 @@
+> **RQL 2.0 is in progress** — a clean-break revision of the language with a formal
+> specification ([specification/rql-2.0.md](specification/rql-2.0.md)) and a new
+> zero-dependency TypeScript reference parser (`src/`). RQL 2.0 specifies the language
+> as it evolved in production use (most directly in
+> [Harper](https://github.com/HarperFast/harper)'s REST interface), idealized for
+> coherence rather than tied to any single implementation. The 1.x implementation below
+> is retained unchanged for reference; see the spec's Appendix A for 1.x migration.
+
 [![Build Status](https://travis-ci.org/persvr/rql.svg?branch=master)](https://travis-ci.org/persvr/rql)
 
 Resource Query Language (RQL) is a query language designed for use in URIs with object
