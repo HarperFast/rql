@@ -121,6 +121,9 @@ define(function (require) {
 					{ name: 'or', args: [{ name: 'eq', args: [ 'a', 'b' ]}, { name: 'eq', args: [ 'c', 'd' ]}]},
 					{ name: 'or', args: [{ name: 'eq', args: [ 'e', 'f' ]}, { name: 'eq', args: [ 'g', 1 ]}]}
 				]}
+			},
+			'uri encoding': {
+				'a(number%3A1)': {name: 'and', args: [{ name: 'a', args: [ 1 ]}]}
 			}
 		},
 		testParsing = (function () {

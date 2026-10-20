@@ -179,6 +179,7 @@ exports.commonOperatorMap = {
 	"gt" : ">"
 }
 function stringToValue(string, parameters){
+	string = decodeURIComponent(string);
 	var converter = exports.converters['default'];
 	if(string.charAt(0) === "$"){
 		var param_index = parseInt(string.substring(1)) - 1;
@@ -215,7 +216,6 @@ exports.converters = {
           if (isoDate) {
             date = new Date(Date.UTC(+isoDate[1], +isoDate[2] - 1, +isoDate[3], +isoDate[4], +isoDate[5], +isoDate[6], +isoDate[7] || 0));
           }*/
-			string = decodeURIComponent(string);
 			if(exports.jsonQueryCompatible){
 				if(string.charAt(0) == "'" && string.charAt(string.length-1) == "'"){
 					return JSON.parse('"' + string.substring(1,string.length-1) + '"');
@@ -263,16 +263,16 @@ exports.converters = {
 		return x === "true";
 	},
 	string: function(string){
-		return decodeURIComponent(string);
+		return string;
 	},
 	re: function(x){
-		return new RegExp(decodeURIComponent(x), 'i');
+		return new RegExp(x, 'i');
 	},
 	RE: function(x){
-		return new RegExp(decodeURIComponent(x));
+		return new RegExp(x);
 	},
 	glob: function(x){
-		var s = decodeURIComponent(x).replace(/([\\|\||\(|\)|\[|\{|\^|\$|\*|\+|\?|\.|\<|\>])/g, function(x){return '\\'+x;}).replace(/\\\*/g,'.*').replace(/\\\?/g,'.?');
+		var s = x.replace(/([\\|\||\(|\)|\[|\{|\^|\$|\*|\+|\?|\.|\<|\>])/g, function(x){return '\\'+x;}).replace(/\\\*/g,'.*').replace(/\\\?/g,'.?');
 		if (s.substring(0,2) !== '.*') s = '^'+s; else s = s.substring(2);
 		if (s.substring(s.length-2) !== '.*') s = s+'$'; else s = s.substring(0, s.length-2);
 		return new RegExp(s, 'i');
