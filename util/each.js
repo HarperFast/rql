@@ -1,7 +1,3 @@
-({define:typeof define!=='undefined'?define:function(deps, factory){module.exports = factory(exports);}}).
-define([], function(){
-return each;
-
 function each(array, callback){
 	var emit, result;
 	if (callback.length > 1) {
@@ -18,4 +14,12 @@ function each(array, callback){
 	}
 	return result;
 }
-});
+
+if(typeof define != "undefined") {
+	define([], function() {
+	  return each;
+	});
+  }else {
+	module.exports = each;
+}
+  

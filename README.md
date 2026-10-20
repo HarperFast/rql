@@ -1,5 +1,3 @@
-[![Build Status](https://travis-ci.org/persvr/rql.svg?branch=master)](https://travis-ci.org/persvr/rql)
-
 Resource Query Language (RQL) is a query language designed for use in URIs with object
 style data structures. This project includes the RQL specification and
 provides a JavaScript implementation of query
@@ -27,8 +25,14 @@ Such that this can be used in URIs like:
 Using the JavaScript library we can construct queries
 using chained operator calls in JavaScript. We could execute the query above like this:
 
-    var Query = require("rql/query").Query;
-    var fooEq3Query = new Query().eq("foo",3);
+    var query = require("rql/js-array").query;
+
+    var fooEq3Query = query("eq(foo,3)");
+    var results = fooEq3Query(data);
+
+    // or
+	var results = query("eq(foo,3)", undefined, data);
+
 
 # RQL Rules
 
@@ -118,9 +122,12 @@ for more less operators):
 * contains(&lt;property>,&lt;value | expression>) - Filters for objects where the specified property's value is an array and the array contains any value that equals the provided value or satisfies the provided expression.
 * excludes(&lt;property>,&lt;value | expression>) - Filters for objects where the specified property's value is an array and the array does not contain any of value that equals the provided value or satisfies the provided expression.
 * limit(count,start,maxCount) - Returns the given range of objects from the result set
+* like(property, pattern) - Search for the specified pattern in the specified property.
 * and(&lt;query>,&lt;query>,...) - Applies all the given queries
 * or(&lt;query>,&lt;query>,...) - The union of the given queries
+* not(query) - negation
 * eq(&lt;property>,&lt;value>) - Filters for objects where the specified property's value is equal to the provided value
+* like(&lt;property>,&lt;value>) - Filters for objects where the specified property's value is like to the provided value in [glob format][1]
 * lt(&lt;property>,&lt;value>) - Filters for objects where the specified property's value is less than the provided value
 * le(&lt;property>,&lt;value>) - Filters for objects where the specified property's value is less than or equal to the provided value
 * gt(&lt;property>,&lt;value>) - Filters for objects where the specified property's value is greater than the provided value
@@ -137,6 +144,12 @@ for more less operators):
 * count() - Returns the count of the number of records in the query's result set
 
 # JavaScript Modules
+
+## rql/js-array
+
+An implementation of RQL for JavaScript arrays. For example:
+
+	require("./js-array").query("a=3", {}, [{a:1},{a:3}]) -> [{a:3}]
 
 ## rql/query
 
@@ -181,42 +194,28 @@ For example:
 		]
 	}
 
-Installation
-========
-
-RQL can be installed using any standard package manager, for example with NPM:
-
-    npm install rql
-
-or CPM:
-
-    cpm install rql
-
-or RingoJS:
-
-    ringo-admin install persvr/rql
-
 
 Licensing
 --------
 
-The RQL implementation is part of the Persevere project, and therefore is licensed under the
-AFL or BSD license. The Persevere project is administered under the Dojo foundation,
-and all contributions require a Dojo CLA.
+This RQL implementation is part of APS JavaScript SDK and licensed under the BSD license.
 
 Project Links
 ------------
 
-See the main Persevere project for more information:
+See the main APS Standard for more information:
 
 ### Homepage:
 
-* [http://persvr.org/](http://persvr.org/)
+* [http://apsstandard.org/](http://apsstandard.org/)
 
-### Mailing list:
+### About RQL in APS:
 
-* [http://groups.google.com/group/json-query](http://groups.google.com/group/json-query)
+* [https://doc.apsstandard.org/2.1/spec/rql/](https://doc.apsstandard.org/2.1/spec/rql/)
 
-### IRC:
+### RQL Specification:
 
-* [\#persevere on irc.freenode.net](http://webchat.freenode.net/?channels=persevere)
+* [https://github.com/persvr/rql/tree/master/specification](https://github.com/persvr/rql/tree/master/specification)
+
+
+[1]: https://github.com/xiag-ag/rql-parser/#operators

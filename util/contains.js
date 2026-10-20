@@ -1,7 +1,3 @@
-({define:typeof define!=='undefined'?define:function(deps, factory){module.exports = factory(exports);}}).
-define([], function(){
-return contains;
-
 function contains(array, item){
 	for(var i = 0, l = array.length; i < l; i++){
 		if(array[i] === item){
@@ -9,4 +5,11 @@ function contains(array, item){
 		}
 	}
 }
-});
+
+if(typeof define != "undefined") {
+	define([], function() {
+	  return contains;
+	});
+  }else {
+	module.exports = contains;
+}  
