@@ -647,6 +647,12 @@ Honest gaps, recorded rather than mapped away:
 - **Projection aliasing and casting** — `select=alias:column`, `select=column::text`.
   RQL's `Projection` has no rename or cast; a future revision could add an optional
   `as`/`cast` to `Field`.
+- **Operator configuration arguments** — `phfts(english).The%20Fat%20Cats` carries a
+  full-text-search configuration, but `Condition` has no operator-argument slot. A
+  dialect front-end can preserve it in the opaque extension comparator name
+  (`phfts(english)`); that spelling falls outside §4's `fiql-name` grammar and does
+  not round-trip through §7 serialization. A future revision could model arguments
+  separately.
 - **Null ordering** — `order=age.nullsfirst`. `SortKey` (§6) has no nulls placement;
   reserved for a future revision.
 - **Aggregates in projections** — `select=amount.sum()`; RQL keeps aggregation in the

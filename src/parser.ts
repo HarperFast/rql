@@ -120,7 +120,7 @@ function accToGroup(acc: Acc): Group | undefined {
 }
 
 // §5.4 De Morgan desugaring for not(...). Recursively toggles negated flags inward.
-function negateTerm(term: Term): Term {
+export function negateTerm(term: Term): Term {
 	if ('terms' in term) return negateGroup(term as Group);
 	if ('some' in term) {
 		const em = term as ElementMatch;
@@ -134,7 +134,7 @@ function negateTerm(term: Term): Term {
 	return r;
 }
 
-function negateGroup(grp: Group): Term {
+export function negateGroup(grp: Group): Term {
 	// Single-term group: collapse to the negated leaf directly.
 	if (grp.terms.length === 1) return negateTerm(grp.terms[0]);
 	const op: 'and' | 'or' = grp.operator === 'and' ? 'or' : 'and';
