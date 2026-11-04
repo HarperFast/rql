@@ -1,0 +1,96 @@
+{
+	"source": {
+		"repo": "HarperFast/harper",
+		"issue": 2440,
+		"url": "https://github.com/HarperFast/harper/issues/2440",
+		"title": "RQL 2.0 conformance: divergence tracking"
+	},
+	"fetchedAt": "2026-09-01T23:16:18.888Z",
+	"note": "Snapshot of Harper’s divergence ledger, cached so the harness can classify offline. The issue is canonical; refresh with `npm run conformance:refresh-ledger`.",
+	"rows": [
+		{
+			"row": 1,
+			"divergence": "Simple queries (no structural chars) skip parsing; conditions surface as raw name/value pairs (dual shape)",
+			"class": "permitted",
+			"action": "adapter maps to canonical model"
+		},
+		{
+			"row": 2,
+			"divergence": "Chains attach as `chainedConditions`; nameless legs (`a=ge=1&=5`) inherit the previous comparator",
+			"class": "representational + quirk",
+			"action": "adapter; nameless legs are a syntax error in 2.0 — deprecate"
+		},
+		{
+			"row": 3,
+			"divergence": "Strict/coercive modeled as distinct comparators (`equals`/`not_equal` vs `eq`/`ne`)",
+			"class": "permitted",
+			"action": "adapter normalizes to value-literal modes (§5.2)"
+		},
+		{
+			"row": 4,
+			"divergence": "`between` is a first-class comparator",
+			"class": "permitted",
+			"action": "spec Appendix B alias; desugars to element-scoped `ge`+`le`"
+		},
+		{
+			"row": 5,
+			"divergence": "Sort is a linked list; select is a polymorphic array with marker props",
+			"class": "permitted",
+			"action": "adapter"
+		},
+		{
+			"row": 6,
+			"divergence": "`(4)` on a non-list comparator is the literal string `\"(4)\"`",
+			"class": "tolerance",
+			"action": "keep; producers must not rely on it"
+		},
+		{
+			"row": 7,
+			"divergence": "`prop[]=v` repeated array params",
+			"class": "tolerance",
+			"action": "spec Appendix B host accommodation"
+		},
+		{
+			"row": 8,
+			"divergence": "Parse errors deferred into the pipeline (`parseError`)",
+			"class": "permitted",
+			"action": "§6.1 allows deferred mode"
+		},
+		{
+			"row": 9,
+			"divergence": "`group-by(...)` accepted at parse and falls through into `sort` (missing `break`)",
+			"class": "bug",
+			"action": "fix in flight (dispatch `harper-groupby-fallthrough`); 2.0 parse-rejects reserved call names"
+		},
+		{
+			"row": 10,
+			"divergence": "Chained legs' values never type-coerced on the REST path → mixed-type ranges, silent superset/empty results",
+			"class": "bug",
+			"action": "#2433"
+		},
+		{
+			"row": 11,
+			"divergence": "Indexed `elements` attributes return one result per matching element (duplicates)",
+			"class": "bug",
+			"action": "#2434"
+		},
+		{
+			"row": 12,
+			"divergence": "`contains` matches numbers via decimal-string coercion",
+			"class": "divergence",
+			"action": "spec §5.1.1: string comparators match only strings; decide keep-as-divergence vs align"
+		},
+		{
+			"row": 13,
+			"divergence": "No `not(...)` group/scope negation",
+			"class": "feature gap",
+			"action": "sub-issue below"
+		},
+		{
+			"row": 14,
+			"divergence": "Element conditions (`prop[=ge=10|=le=2]`) and scoped sub-queries per §5.3 surface",
+			"class": "partial",
+			"action": "Harper has `prop[cond&cond]`; elem-cond (empty relative path) not supported — fold into not() work or file separately"
+		}
+	]
+}

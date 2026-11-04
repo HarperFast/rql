@@ -1,0 +1,10 @@
+{
+	"extends": "../tsconfig.json",
+	"compilerOptions": {
+		"noEmit": true,
+		"allowImportingTsExtensions": true,
+		"types": ["node"],
+		"resolveJsonModule": true
+	},
+	"include": ["../conformance/**/*.ts", "../test/conformance/**/*.ts", "../src/**/*.ts"]
+}
